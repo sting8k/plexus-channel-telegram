@@ -187,10 +187,17 @@ export async function startFakeTelegram(options = {}) {
  * turns a prompt asking for the approval or the question test into the matching
  * tool call so those flows can be driven without a real model.
  *
+ * @param options - optional overrides.
+ * @param options.approvalCommand - the command inside the approval tool call.
+ *   Defaults to the path the smoke test has always used; a harness should pass
+ *   its own temporary path, since a fixed one is shared by every run and two
+ *   harnesses writing it would make each other's assertions pass.
+ *
  * @returns the endpoint it bound (port and base URL), the request bodies it
  *   received, and a `close()` that awaits one shared shutdown.
  */
-export async function startFakeLlm() {
+export async function startFakeLlm(options = {}) {
+  const { approvalCommand = 'echo hi > /tmp/tg-approval-smoke' } = options
   const requests = []
   const server = http.createServer((req, res) => {
     let body = ''
@@ -214,7 +221,7 @@ export async function startFakeLlm() {
       const wantsApproval = lastUserText.includes('run approval test')
       const wantsQuestion = lastUserText.includes('run question test')
       const toolCallArgs = JSON.stringify({
-        command: 'echo hi > /tmp/tg-approval-smoke',
+        command: approvalCommand,
         description: 'run approval smoke test',
         sandbox_permissions: 'workspace-write',
         justification: 'smoke test approval flow',
