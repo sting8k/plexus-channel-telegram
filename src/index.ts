@@ -21,7 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { createUserMessage, type AssistantMessage, type MessageId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { resolveSessionPreset, type AgentPresets } from '@deepseek-ai/dsh-agent-presets'
+import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
 import type { AgentDefaultModelConfig } from '@deepseek-ai/dsh-agent-default-model'
 import type { JobId, JobRegistry } from '@deepseek-ai/dsh-jobs'
 import { SessionId, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
@@ -254,12 +254,9 @@ export function apply(ctx: Context, config: Config): void {
   // fallback, so a session whose title predates this plugin is still named.
   const titles = new Map<SessionId, string>()
   // Session history moved from the `events` property to `snapshotEvents()` in
-  // newer Harness releases. Support both while this plugin remains compatible
-  // with the older peer dependency range.
-  const sessionEvents = (session: Session): readonly SessionEvent[] => {
-    const current = session as Session & { snapshotEvents?: () => readonly SessionEvent[] }
-    return current.snapshotEvents === undefined ? session.events : current.snapshotEvents()
-  }
+  // `session.events` was removed in 0.1.2; `snapshotEvents()` is the only way to
+  // read a session's events, and the peer range no longer admits the older form.
+  const sessionEvents = (session: Session): readonly SessionEvent[] => session.snapshotEvents()
   const seedTitle = (session: Session): void => {
     const snapshot = foldSessionTitle(sessionEvents(session))
     if (snapshot !== undefined) titles.set(session.id, snapshot.title)
@@ -330,6 +327,17 @@ export function apply(ctx: Context, config: Config): void {
 
   const jobsService = (): JobRegistry | undefined => ctx.get('jobs') as JobRegistry | undefined
   const persistence = (): SessionPersistence | undefined => ctx.get('sessionPersistence') as SessionPersistence | undefined
+  /** The slice of the optional session-query seam this plugin reads. */
+  interface SessionQuerySeam {
+    observeSession(
+      id: SessionId,
+      options: { projectionMode: 'all' },
+    ): Promise<{
+      projections?: { values?: { agentPreset?: string } }
+      [Symbol.dispose](): void
+    }>
+  }
+
   const presetsService = (): AgentPresets | undefined => ctx.get('agentPresets') as AgentPresets | undefined
   const defaultModel = (): AgentDefaultModelConfig | undefined => ctx.get('agentDefaultModel') as AgentDefaultModelConfig | undefined
 
@@ -403,10 +411,20 @@ export function apply(ctx: Context, config: Config): void {
     try {
       const presets = presetsService()
       let presetId: string | undefined
-      if (presets !== undefined) {
+      // The preset a session is running is read from the session-query seam when
+      // the host provides one, and left undefined otherwise: the caller then falls
+      // back to the deployment default, which is what it did before this seam
+      // existed. The observation is a synchronous Disposable, so it is released
+      // in a `finally` rather than left to a collection.
+      const query = ctx.get('sessionQuery') as SessionQuerySeam | undefined
+      if (typeof query?.observeSession === 'function') {
         try {
-          const inspected = await service.inspect(sessionId)
-          presetId = resolveSessionPreset({ header: inspected.meta, events: inspected.events })
+          const observation = await query.observeSession(sessionId, { projectionMode: 'all' })
+          try {
+            presetId = observation.projections?.values?.agentPreset ?? undefined
+          } finally {
+            observation[Symbol.dispose]()
+          }
         } catch (error) {
           ctx.logger.warn(`telegram-control: preset resolution for ${sessionId} failed: ${describeError(error)}`)
         }

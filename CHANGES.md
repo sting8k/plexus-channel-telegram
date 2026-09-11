@@ -25,3 +25,11 @@ Upstream is the `upstream` remote; pull fixes from there when useful.
   provides without knowing the package by name.
 
 No plugin behaviour, configuration or message rendering changed.
+- Read a session's agent preset from the optional `sessionQuery` seam instead of
+  `resolveSessionPreset`, which 0.1.2 removed; the observation is released in a
+  `finally`, and an absent or failing seam leaves the deployment default in place.
+- Pin the dsh closure to 0.1.2-rc.1 throughout: dev dependencies exact, peer ranges
+  `^0.1.2-rc.1`, and `session.events` — gone in 0.1.2 — dropped from the shim.
+- The previous smoke pass was a false green: the CLI was 0.1.2 but the plugin
+  resolved its imports from this package's own 0.1.0-rc.6 development closure, so
+  no 0.1.2 API was ever exercised.
