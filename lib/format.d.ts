@@ -16,8 +16,14 @@ export declare function markdownToTelegramHtml(markdown: string): string;
 export declare function toolCallPreview(name: string, rawArguments: string, maxChars?: number): string;
 /**
  * Split one message into Telegram-safe chunks (hard cap `max` chars each).
- * Prefers newline boundaries; a single over-long line is hard-split.
- * @param text - the full message to split.
+ *
+ * Prefers newline boundaries. A line with none is cut at a closing tag that
+ * leaves nothing open, or failing that between constructs. A boundary that falls
+ * inside a fenced code block closes the block in the chunk it leaves and reopens
+ * it in the next, because Telegram refuses an unclosed `<pre>` with a 400 and that
+ * loses the whole reply rather than one block.
+ *
+ * @param text - the full message to split, already rendered to Telegram HTML.
  * @param max - per-chunk character cap (Telegram's own limit is 4096).
  * @returns the ordered chunks; `[text]` when it already fits.
  */

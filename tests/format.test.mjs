@@ -144,3 +144,80 @@ test('toolCallPreview shows the command, clipped, and falls back to the name', (
   assert.equal(toolCallPreview('think', '{"thought":"..."}'), '🔧 <code>think</code>')
   assert.equal(toolCallPreview('bash', 'not json'), '🔧 <code>bash</code>')
 })
+
+test('splitMessage closes and reopens a fenced block at the boundary', () => {
+  // A rendered reply whose code block straddles the 4000-char cap: Telegram
+  // refuses an unclosed <pre> with a 400, and that loses the whole reply.
+  const markdown = `intro ${'x'.repeat(3900)}\n\n\`\`\`\n${'echo line\n'.repeat(300)}\`\`\`\n`
+  const html = markdownToTelegramHtml(markdown)
+  const chunks = splitMessage(html, 4000)
+  assert.ok(chunks.length > 1, 'the reply is split at all')
+  for (const chunk of chunks) {
+    assert.ok(chunk.length <= 4000, `every chunk stays within the cap, got ${chunk.length}`)
+    assert.equal(
+      (chunk.match(/<pre>/g) ?? []).length,
+      (chunk.match(/<\/pre>/g) ?? []).length,
+      'every chunk is balanced, so Telegram does not answer 400',
+    )
+  }
+  assert.ok(chunks[0].endsWith('</pre>'), 'the chunk that leaves the block closes it')
+  assert.ok(chunks[1].startsWith('<pre>'), 'the next chunk reopens it')
+})
+
+test('splitMessage adds no fence tags when the block is not straddled', () => {
+  const html = markdownToTelegramHtml('```\nls -la\n```')
+  assert.deepEqual(splitMessage(html, 4000), [html])
+  // Same block, but pushed past the cap by preceding prose: the boundary lands
+  // in the prose, so the block arrives whole in the next chunk.
+  const surrounded = `prose ${'y'.repeat(3990)}\n${html}`
+  const chunks = splitMessage(surrounded, 4000)
+  assert.equal(chunks.join('\n').includes('<pre>ls -la</pre>'), true)
+  assert.equal(chunks.filter((chunk) => chunk.includes('<pre>')).length, 1)
+})
+
+test('splitMessage does not cut inside an entity on a hard split', () => {
+  // One line with no newline at all, so the cap falls on an arbitrary character.
+  const chunks = splitMessage('&amp;'.repeat(1200), 4000)
+  assert.ok(chunks.length > 1, 'the line is split')
+  for (const chunk of chunks) {
+    assert.equal(
+      chunk.replace(/&(amp|lt|gt|quot);/g, '').includes('&'),
+      false,
+      `no entity is left half-written: ${JSON.stringify(chunk.slice(-12))}`,
+    )
+  }
+})
+
+test('splitMessage cuts a hard split at a closed-tag boundary', () => {
+  // One line of generated tags, long enough that the cap falls inside it: the cut
+  // lands where a closing tag left nothing open, so each chunk stands on its own.
+  const chunks = splitMessage(markdownToTelegramHtml(`x ${'**boldword** '.repeat(500)}`), 4000)
+  assert.ok(chunks.length > 1, 'the line is split')
+  for (const chunk of chunks) {
+    assert.equal(
+      chunk.replace(/<\/?(pre|code|b|i|a)(\s[^>]*)?>/g, '').includes('<'),
+      false,
+      'no half-written tag reaches Telegram',
+    )
+    assert.equal(
+      (chunk.match(/<(pre|code|b|i|a)(\s[^>]*)?>/g) ?? []).length,
+      (chunk.match(/<\/(pre|code|b|i|a)>/g) ?? []).length,
+      'every chunk closes what it opens',
+    )
+  }
+  // A window holding no closed-tag boundary is cut raw and accepted as malformed:
+  // one unbroken construct spanning the whole cap, which no model reply produces.
+  const unbroken = splitMessage(`<b>${'x'.repeat(5000)}</b>`, 4000)
+  assert.ok(unbroken.length > 1, 'still split')
+  for (const chunk of unbroken) assert.ok(chunk.length <= 4000, 'still within the cap')
+})
+
+test('markdownToTelegramHtml keeps emphasis out of a link href', () => {
+  // Underscores in the target used to be turned into <i> inside the attribute.
+  assert.equal(markdownToTelegramHtml('see [x](https://ex.com/a/_b_) now'), 'see <a href="https://ex.com/a/_b_">x</a> now')
+  // The label may still carry emphasis, which is not in an attribute.
+  assert.equal(
+    markdownToTelegramHtml('[**bold** label](https://ex.com/plain)'),
+    '<a href="https://ex.com/plain"><b>bold</b> label</a>',
+  )
+})
