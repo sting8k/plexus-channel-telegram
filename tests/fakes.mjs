@@ -197,7 +197,10 @@ export async function startFakeTelegram(options = {}) {
  *   received, and a `close()` that awaits one shared shutdown.
  */
 export async function startFakeLlm(options = {}) {
-  const { approvalCommand = 'echo hi > /tmp/tg-approval-smoke' } = options
+  const {
+    approvalCommand = 'echo hi > /tmp/tg-approval-smoke',
+    approvalSandboxPermissions = 'workspace-write',
+  } = options
   const requests = []
   const server = http.createServer((req, res) => {
     let body = ''
@@ -218,12 +221,17 @@ export async function startFakeLlm(options = {}) {
       const lastUserText = typeof lastUser?.content === 'string'
         ? lastUser.content
         : (Array.isArray(lastUser?.content) ? lastUser.content.map(p => p.text ?? '').join('') : '')
-      const wantsApproval = lastUserText.includes('run approval test')
-      const wantsQuestion = lastUserText.includes('run question test')
+      // A tool result closes the turn. Answering it with the same scripted tool
+      // call would replay it forever, so the final message decides first and the
+      // user-message triggers only apply while the turn is still open.
+      const lastMessage = messages[messages.length - 1]
+      const afterToolResult = lastMessage?.role === 'tool'
+      const wantsApproval = lastUserText.includes('run approval test') && !afterToolResult
+      const wantsQuestion = lastUserText.includes('run question test') && !afterToolResult
       const toolCallArgs = JSON.stringify({
         command: approvalCommand,
         description: 'run approval smoke test',
-        sandbox_permissions: 'workspace-write',
+        sandbox_permissions: approvalSandboxPermissions,
         justification: 'smoke test approval flow',
       })
       const questionCallArgs = JSON.stringify({
