@@ -295,6 +295,108 @@ try {
   check('phase C2: question message edited with the answer', tgEdits.some(m => m.text.includes('Selected')))
   ok = ok && await waitFor(child, bootLog, () => llmRequests.length >= llmBeforeQuestion + 1, 'the post-question model call')
   check('phase C2: answered question continued the turn', llmRequests.length >= llmBeforeQuestion + 1)
+
+  // ---- phase D: a forum topic is its own conversation ----
+  // Same chat, different conversation: a topic must answer in the topic it was
+  // written in, and must not share General's selection slot — otherwise two
+  // topics (and General) would answer each other's messages.
+  const THREAD_ID = 7
+  const sentBeforeTopic = tgSent.length
+  tgQueue.push({
+    update_id: 900,
+    message: {
+      message_id: 900,
+      chat: { id: CHAT_ID, type: 'supergroup' },
+      from: { id: CHAT_ID },
+      text: '/agent 1',
+      date: 0,
+      message_thread_id: THREAD_ID,
+      is_topic_message: true,
+    },
+  })
+  ok = ok && await waitFor(
+    child,
+    bootLog,
+    () => tgSent.slice(sentBeforeTopic).some((m) => m.message_thread_id === THREAD_ID),
+    'a reply inside topic 7',
+  )
+  const topicReplies = tgSent.slice(sentBeforeTopic).filter((m) => m.message_thread_id === THREAD_ID)
+  check(
+    'phase D: the reply lands in the topic the message came from',
+    topicReplies.length >= 1 && topicReplies.every((m) => m.chat_id === CHAT_ID),
+  )
+  check(
+    'phase D: General replies carry no message_thread_id',
+    tgSent.slice(0, sentBeforeTopic).every((m) => m.message_thread_id === undefined),
+  )
+  const topicState = JSON.parse(readFileSync(join(dshHome, 'telegram-control-state.json'), 'utf8'))
+  check(
+    'phase D: the topic took the conversation over',
+    typeof topicState[`${CHAT_ID}:${THREAD_ID}`] === 'string',
+    Object.keys(topicState).join(', '),
+  )
+  check(
+    'phase D: the conversation is no longer General\'s',
+    topicState[String(CHAT_ID)] === undefined,
+    `keys ${Object.keys(topicState).join(', ')}`,
+  )
+  check(
+    'phase D: General was told where the conversation moved',
+    tgSent.some((m) => m.message_thread_id === undefined && m.text === `conversation moved to topic ${THREAD_ID}`),
+  )
+
+  // ---- phase D2: a question and an approval follow the owner ----
+  // The routing law: a request belongs to the conversation that holds the agent
+  // and to no other. General holds nothing now, so nothing may land there.
+  const questionsBefore = tgQuestions.length
+  tgQueue.push({
+    update_id: 901,
+    message: {
+      message_id: 901,
+      chat: { id: CHAT_ID, type: 'supergroup' },
+      from: { id: CHAT_ID },
+      text: 'run question test',
+      date: 0,
+      message_thread_id: THREAD_ID,
+      is_topic_message: true,
+    },
+  })
+  ok = ok && await waitFor(child, bootLog, () => tgQuestions.length > questionsBefore, 'the question to reach topic 7')
+  check(
+    'phase D2: the question reaches the conversation that owns the agent',
+    tgQuestions.slice(questionsBefore).some((m) => m.message_thread_id === THREAD_ID),
+  )
+  check(
+    'phase D2: no question was sent to General',
+    tgQuestions.slice(questionsBefore).every((m) => m.message_thread_id === THREAD_ID),
+    `${tgQuestions.slice(questionsBefore).length} question(s) after the topic trigger`,
+  )
+
+  const approvalsBefore = tgApprovals.length
+  tgQueue.push({
+    update_id: 902,
+    message: {
+      message_id: 902,
+      chat: { id: CHAT_ID, type: 'supergroup' },
+      from: { id: CHAT_ID },
+      text: 'run approval test',
+      date: 0,
+      message_thread_id: THREAD_ID,
+      is_topic_message: true,
+    },
+  })
+  ok = ok && await waitFor(child, bootLog, () => tgApprovals.length > approvalsBefore, 'the approval to reach topic 7')
+  check(
+    'phase D2: the approval reaches the conversation that owns the agent',
+    tgApprovals.slice(approvalsBefore).some((m) => m.message_thread_id === THREAD_ID),
+  )
+  check(
+    'phase D2: no approval was sent to General',
+    tgApprovals.slice(approvalsBefore).every((m) => m.message_thread_id === THREAD_ID),
+    `${tgApprovals.slice(approvalsBefore).length} approval(s) after the topic trigger`,
+  )
+  // Let the scheduled button presses settle so the phase closes its turns.
+  await waitFor(child, bootLog, () => tgCallbackAnswers.some((a) => a.text === 'Approved'), 'the topic approval answer')
 } finally {
   if (child !== undefined) child.kill('SIGTERM')
   await new Promise((resolve) => child?.once('exit', resolve))

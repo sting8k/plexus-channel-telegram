@@ -83,7 +83,7 @@ function emphasize(text: string): string {
 const LINK = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/
 
 /** Tool-call notice for the chat: the tool name, then its command or path as a code block (each field clipped to `maxChars`, the command's original line breaks kept). */
-export function toolCallPreview(name: string, rawArguments: string, maxChars = 300): string {
+export function toolCallPreview(name: string, rawArguments: string, maxChars = 100): string {
   let args: Record<string, unknown> = {}
   try { args = JSON.parse(rawArguments) as Record<string, unknown> } catch { /* not JSON: name only */ }
   const value = ['command', 'path', 'file_path', 'pattern', 'query', 'url']
@@ -274,6 +274,60 @@ export function parseApprovalCallback(data: string): ParsedApprovalCallback | un
   const match = /^(approve|reject):([0-9a-f-]+)$/.exec(data)
   if (match === null) return undefined
   return { approve: match[1] === 'approve', token: match[2] ?? '' }
+}
+
+/** One option of a user question, as the question seam declares it. */
+export interface QuestionOption {
+  label: string
+  /** Optional extra context; the body shows it, a button never does. */
+  description?: string
+}
+
+/** The longest a numbered option button may be, its number included. */
+const OPTION_BUTTON_MAX = 40
+
+/** The buttons for one question: one option per row, in the order the body lists them. */
+export interface QuestionKeyboard {
+  inline_keyboard: { text: string; callback_data: string }[][]
+}
+
+/**
+ * How one question's options appear in Telegram: body lines, and buttons when
+ * the question has a single answer to give.
+ *
+ * The body carries every option in full — escaped label, then the description
+ * when there is one — because a button shows only a clipped label. The number is
+ * what ties the two together, so it is in both and in the same order. Multi
+ * select and free-text questions get the list and no buttons: there is no single
+ * option a press could mean.
+ *
+ * @param options - the question's options, in the order the caller declared.
+ * @param token - the request token embedded in every button's callback_data.
+ * @param singleSelect - whether one press answers the question.
+ */
+export function questionOptions(
+  options: readonly QuestionOption[],
+  token: string,
+  singleSelect: boolean,
+): { lines: string[]; keyboard: QuestionKeyboard | undefined } {
+  const lines = options.map((option, index) => {
+    const description = option.description === undefined || option.description.trim() === ''
+      ? ''
+      : ` — ${escapeHtml(option.description)}`
+    return `${index + 1}. <b>${escapeHtml(option.label)}</b>${description}`
+  })
+  if (!singleSelect) return { lines, keyboard: undefined }
+  return {
+    lines,
+    keyboard: {
+      inline_keyboard: options.map((option, index) => [{
+        // An operator reads "2." in the body and must find "2." on the button; a
+        // label past the cap is clipped with an ellipsis rather than cut silently.
+        text: clip(`${index + 1}. ${option.label}`, OPTION_BUTTON_MAX),
+        callback_data: `question:${token}:${index}`,
+      }]),
+    },
+  }
 }
 
 /** One parsed question-button callback: the request token and the option index. */

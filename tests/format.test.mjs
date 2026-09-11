@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { escapeHtml, homeShorten, markdownToTelegramHtml, parseApprovalCallback, parseBotCommand, parseQuestionCallback, renderUptime, splitMessage, toolCallPreview, trimReasoning } from '../lib/format.js'
+import { escapeHtml, homeShorten, markdownToTelegramHtml, parseApprovalCallback, parseBotCommand, parseQuestionCallback, questionOptions, renderUptime, splitMessage, toolCallPreview, trimReasoning } from '../lib/format.js'
 
 test('escapeHtml escapes HTML metacharacters', () => {
   assert.equal(escapeHtml('<b>&"quoted"</b>'), '&lt;b&gt;&amp;&quot;quoted&quot;&lt;/b&gt;')
@@ -141,7 +141,7 @@ test('markdownToTelegramHtml leaves snake_case and 2*3*4 alone', () => {
 test('toolCallPreview puts the command in a code block under the name, clipped, and falls back to the name', () => {
   assert.equal(toolCallPreview('bash', '{"command":"ls -la\\necho hi","description":"List files"}'), '🔧 <b>bash</b> — List files\n<pre>ls -la\necho hi</pre>')
   assert.equal(toolCallPreview('bash', '{"command":"pwd"}'), '🔧 <b>bash</b>\n<pre>pwd</pre>')
-  assert.equal(toolCallPreview('bash', `{"command":"${'x'.repeat(400)}"}`).length < 330, true)
+  assert.equal(toolCallPreview('bash', `{"command":"${'x'.repeat(400)}"}`), `🔧 <b>bash</b>\n<pre>${'x'.repeat(99)}…</pre>`)
   assert.equal(toolCallPreview('think', '{"thought":"..."}'), '🔧 <b>think</b>')
   assert.equal(toolCallPreview('bash', 'not json'), '🔧 <b>bash</b>')
   // Every field is escaped, so markup in a command or description cannot close
@@ -153,8 +153,7 @@ test('toolCallPreview puts the command in a code block under the name, clipped, 
   // The notice is sent as one message and never split, so no field may push it
   // past Telegram's 4096-character limit — a long description is clipped too.
   const long = toolCallPreview('bash', JSON.stringify({ command: 'pwd', description: 'x'.repeat(5000) }))
-  assert.ok(long.length < 4096, `the notice stays sendable, got ${long.length} chars`)
-  assert.ok(long.includes('…'), 'and the clipped field says so')
+  assert.equal(long, `🔧 <b>bash</b> — ${'x'.repeat(99)}…\n<pre>pwd</pre>`)
   // A blank description adds no empty emphasis line.
   assert.equal(
     toolCallPreview('bash', JSON.stringify({ command: 'pwd', description: '   ' })),
@@ -227,6 +226,36 @@ test('splitMessage cuts a hard split at a closed-tag boundary', () => {
   const unbroken = splitMessage(`<b>${'x'.repeat(5000)}</b>`, 4000)
   assert.ok(unbroken.length > 1, 'still split')
   for (const chunk of unbroken) assert.ok(chunk.length <= 4000, 'still within the cap')
+})
+
+test('a question lists every option in full and numbers each button to match', () => {
+  const longLabel = 'Keep the longest option label that overflows the button cap'
+  const options = [
+    { label: longLabel, description: 'why <b>A</b> is right' },
+    { label: 'Second', description: 'why B' },
+    { label: 'Third' },
+  ]
+  const view = questionOptions(options, 'tok', true)
+  // The body is where the whole option is readable: escaped, unclipped, numbered.
+  assert.deepEqual(view.lines, [
+    `1. <b>${longLabel}</b> — why &lt;b&gt;A&lt;/b&gt; is right`,
+    '2. <b>Second</b> — why B',
+    '3. <b>Third</b>',
+  ])
+  const rows = view.keyboard?.inline_keyboard ?? []
+  assert.equal(rows.length, 3, 'one row per option')
+  for (const row of rows) assert.equal(row.length, 1, 'one button per row')
+  assert.deepEqual(rows.map((row) => row[0].callback_data), ['question:tok:0', 'question:tok:1', 'question:tok:2'])
+  for (const [index, row] of rows.entries()) {
+    assert.ok(row[0].text.startsWith(`${index + 1}. `), `the button carries the body's number: ${row[0].text}`)
+    assert.ok(row[0].text.length <= 40, `within the button cap: ${row[0].text.length}`)
+  }
+  // Only the button clips, and it says so rather than silently cutting the label.
+  assert.ok(rows[0][0].text.endsWith('…'))
+  // A question with no single answer lists the options and offers no buttons.
+  const multi = questionOptions(options, 'tok', false)
+  assert.deepEqual(multi.lines, view.lines)
+  assert.equal(multi.keyboard, undefined)
 })
 
 test('markdownToTelegramHtml keeps emphasis out of a link href', () => {

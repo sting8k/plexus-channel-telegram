@@ -10,6 +10,30 @@ export interface InlineKeyboardButton {
     text: string;
     callback_data: string;
 }
+/**
+ * Which conversation a message belongs to: a chat, plus the forum topic when the
+ * chat has topics. General, and any non-forum chat, has no thread.
+ */
+export interface ChatKey {
+    chatId: number;
+    /** Forum topic id; absent for General and for chats without topics. */
+    threadId?: number;
+}
+/**
+ * The key for a conversation in the plugin's own maps.
+ *
+ * General (and a chat without topics) is just the chat id, which is also what
+ * state files written before topics existed already use, so an old selection
+ * still resolves.
+ */
+export declare function keyOf(chat: ChatKey): string;
+/** The conversation an incoming message or button press belongs to. */
+export declare function chatKeyOf(source: {
+    chat: {
+        id: number;
+    };
+    message_thread_id?: number;
+}): ChatKey;
 /** One callback-query update (a user tapped an inline button). */
 export interface TelegramCallbackQuery {
     id: string;
@@ -21,6 +45,7 @@ export interface TelegramCallbackQuery {
         chat: {
             id: number;
         };
+        message_thread_id?: number;
     };
     data?: string;
 }
@@ -42,6 +67,10 @@ export interface TelegramUpdate {
         };
         text?: string;
         date: number;
+        /** Forum topic this message belongs to; absent for General. */
+        message_thread_id?: number;
+        /** True when the message was sent in a forum topic, General included. */
+        is_topic_message?: boolean;
     };
     callback_query?: TelegramCallbackQuery;
 }
@@ -97,15 +126,21 @@ export declare class TelegramClient {
      */
     getUpdates(offset: number, timeoutSec?: number, signal?: AbortSignal): Promise<TelegramUpdate[]>;
     /** Send one text message to a chat, optionally with an inline keyboard. */
-    sendMessage(chatId: number, text: string, options?: TelegramSendOptions, signal?: AbortSignal): Promise<{
+    sendMessage(chat: ChatKey, text: string, options?: TelegramSendOptions, signal?: AbortSignal): Promise<{
         message_id: number;
     }>;
     /** Show a chat-action indicator (e.g. `typing`) while work is pending. */
-    sendChatAction(chatId: number, action: TelegramChatAction, signal?: AbortSignal): Promise<void>;
+    sendChatAction(chat: ChatKey, action: TelegramChatAction, signal?: AbortSignal): Promise<void>;
     /** Acknowledge a callback-query button press (required to stop its spinner). */
     answerCallbackQuery(callbackQueryId: string, text?: string, signal?: AbortSignal): Promise<void>;
-    /** Replace the text of a previously sent message (e.g. to show an approval outcome). */
-    editMessageText(chatId: number, messageId: number, text: string, signal?: AbortSignal): Promise<void>;
+    /**
+     * Replace the text of a previously sent message (e.g. to show an approval outcome).
+     *
+     * The edit is keyed by the message id, and `editMessageText` has no
+     * `message_thread_id` parameter, so the body carries none: the `ChatKey` is here
+     * so callers pass the same shape everywhere, not to put a thread in the request.
+     */
+    editMessageText(chat: ChatKey, messageId: number, text: string, signal?: AbortSignal): Promise<void>;
     /** Publish the bot's command menu (shown above the Telegram input field). */
     setMyCommands(commands: readonly BotCommand[], signal?: AbortSignal): Promise<void>;
 }

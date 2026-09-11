@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import { test, after } from 'node:test'
 import http from 'node:http'
-import { TelegramApiError, TelegramClient } from '../lib/client.js'
+import { TelegramApiError, TelegramClient, keyOf } from '../lib/client.js'
 
 /** A minimal fake Telegram API: records requests, replies with a configurable envelope. */
 function fakeTelegram() {
@@ -57,7 +57,7 @@ test('getUpdates sends offset and callback_query subscription', async () => {
 test('sendMessage carries HTML mode and inline keyboard', async () => {
   const { fake, client } = await makeClient()
   const keyboard = { inline_keyboard: [[{ text: '✅', callback_data: 'approve:x' }]] }
-  await client.sendMessage(1, '<b>hi</b>', { replyMarkup: keyboard })
+  await client.sendMessage({ chatId: 1 }, '<b>hi</b>', { replyMarkup: keyboard })
   assert.deepEqual(fake.calls[0].body, {
     chat_id: 1,
     text: '<b>hi</b>',
@@ -70,7 +70,7 @@ test('sendMessage carries HTML mode and inline keyboard', async () => {
 test('answerCallbackQuery and editMessageText post the expected payloads', async () => {
   const { fake, client } = await makeClient()
   await client.answerCallbackQuery('cb-1', '已批准')
-  await client.editMessageText(1, 5, 'done ✅')
+  await client.editMessageText({ chatId: 1 }, 5, 'done ✅')
   assert.deepEqual(fake.calls[0].body, { callback_query_id: 'cb-1', text: '已批准' })
   assert.deepEqual(fake.calls[1].body, { chat_id: 1, message_id: 5, text: 'done ✅', parse_mode: 'HTML' })
 })
@@ -79,6 +79,28 @@ test('setMyCommands posts the command list', async () => {
   const { fake, client } = await makeClient()
   await client.setMyCommands([{ command: 'agents', description: '列出会话' }])
   assert.deepEqual(fake.calls[0].body, { commands: [{ command: 'agents', description: '列出会话' }] })
+})
+
+test('a forum topic adds message_thread_id, and General adds none', async () => {
+  const { fake, client } = await makeClient()
+  await client.sendMessage({ chatId: 7, threadId: 42 }, 'hi')
+  await client.sendMessage({ chatId: 7 }, 'hi')
+  await client.sendChatAction({ chatId: 7, threadId: 42 }, 'typing')
+  await client.editMessageText({ chatId: 7, threadId: 42 }, 5, 'done')
+  assert.equal(fake.calls[0].body.message_thread_id, 42)
+  assert.equal('message_thread_id' in fake.calls[1].body, false)
+  assert.equal(fake.calls[2].body.message_thread_id, 42)
+  // editMessageText has no message_thread_id parameter — the edit is keyed by the
+  // message id — so a ChatKey must not leak a thread into that body.
+  assert.equal('message_thread_id' in fake.calls[3].body, false)
+})
+
+test('keyOf is the bare chat id for General and chat:thread inside a topic', () => {
+  // General must stay the bare id: that is what state files written before
+  // topics existed already use, so an old selection still resolves.
+  assert.equal(keyOf({ chatId: 7 }), '7')
+  assert.equal(keyOf({ chatId: 7, threadId: 42 }), '7:42')
+  assert.notEqual(keyOf({ chatId: 7, threadId: 42 }), keyOf({ chatId: 7 }))
 })
 
 test('a failed envelope throws TelegramApiError with the API code', async () => {

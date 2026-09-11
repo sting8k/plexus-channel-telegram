@@ -32,11 +32,14 @@ import type { AskUserQuestionAnswer, AskUserQuestionItem, AskUserQuestionRequest
 import {
   TelegramApiError,
   TelegramClient,
+  chatKeyOf,
+  keyOf,
   type BotCommand,
+  type ChatKey,
   type TelegramCallbackQuery,
   type TelegramUpdate,
 } from './client.ts'
-import { escapeHtml, homeShorten, markdownToTelegramHtml, parseApprovalCallback, parseBotCommand, parseQuestionCallback, renderUptime, splitMessage, toolCallPreview, trimReasoning } from './format.ts'
+import { escapeHtml, homeShorten, markdownToTelegramHtml, parseApprovalCallback, parseBotCommand, parseQuestionCallback, questionOptions, renderUptime, splitMessage, toolCallPreview, trimReasoning } from './format.ts'
 
 export const name = 'telegram-control'
 export const inject = ['agents', 'sessions']
@@ -103,6 +106,8 @@ export const Config: z<Config> = z.object({
 
 /** Per-chat plugin state. */
 interface ChatState {
+  /** The conversation this state belongs to, so a broadcast can send back to it. */
+  chat: ChatKey
   /** The agent session id this chat selected with `/agent`, if any. */
   agentId: string | undefined
   /** Whether live agent activity is forwarded to this chat. */
@@ -111,7 +116,7 @@ interface ChatState {
 
 /** One in-flight agent reply being accumulated for a chat. */
 interface PendingReply {
-  chatId: number
+  chat: ChatKey
   buffer: string[]
   startedAt: number
   /** The exact follow-up message, so `agent/inbox/claimed` can own this entry's turn. */
@@ -139,7 +144,7 @@ interface PendingApproval {
   /** The original message text, so the outcome can be edited back in. */
   text: string
   /** The chats and message ids the request was forwarded to. */
-  sent: { chatId: number; messageId: number }[]
+  sent: { chat: ChatKey; messageId: number }[]
   /** Clears the pending timer. */
   timeoutDispose: () => void
 }
@@ -151,7 +156,7 @@ interface PendingQuestion {
   /** The original message text, so the answer can be edited back in. */
   text: string
   /** The chats and message ids the question was forwarded to. */
-  sent: { chatId: number; messageId: number }[]
+  sent: { chat: ChatKey; messageId: number }[]
   /** The question's options, for mapping a button press to its label. */
   items: { id: string; label: string }[]
   /** Clears the pending timer. */
@@ -224,8 +229,8 @@ export function apply(ctx: Context, config: Config): void {
   const maxMessageChars = config.maxMessageChars ?? DEFAULT_MAX_MESSAGE_CHARS
 
   const client = new TelegramClient(token, apiBase)
-  const chats = new Map<number, ChatState>()
-  const pendingBySession = new Map<SessionId, Map<number, PendingReply>>()
+  const chats = new Map<string, ChatState>()
+  const pendingBySession = new Map<SessionId, Map<string, PendingReply>>()
   const abort = new AbortController()
 
   // Resolve the Harness home through the launcher-provided accessor when
@@ -455,11 +460,12 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /** Look up a chat's state, creating it on first contact with the persisted selection. */
-  function ensureChat(chatId: number): ChatState {
-    let state = chats.get(chatId)
+  function ensureChat(chat: ChatKey): ChatState {
+    const key = keyOf(chat)
+    let state = chats.get(key)
     if (state === undefined) {
-      state = { agentId: chatSelections[String(chatId)] ?? undefined, watching: false }
-      chats.set(chatId, state)
+      state = { chat, agentId: chatSelections[key] ?? undefined, watching: false }
+      chats.set(key, state)
     }
     return state
   }
@@ -495,11 +501,37 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  /** Record a selection and return the confirmation text to send. */
-  async function selectEntry(chatId: number, entry: ConversationEntry): Promise<void> {
-    const state = ensureChat(chatId)
+  /** A short name for a conversation, from what the update carries: the topic id. */
+  function describeChat(chat: ChatKey): string {
+    return chat.threadId === undefined ? 'the main chat' : `topic ${chat.threadId}`
+  }
+
+  /**
+   * Record a selection and return the confirmation text to send.
+   *
+   * One session belongs to one conversation at a time: taking it from whoever
+   * held it is what lets a question or an approval be routed by session id alone,
+   * rather than guessed between conversations that both claim it — and the
+   * conversation that lost it is told, instead of going quiet with no reason.
+   */
+  async function selectEntry(chat: ChatKey, entry: ConversationEntry): Promise<void> {
+    const key = keyOf(chat)
+    const state = ensureChat(chat)
+    const moved = [...chats.values()].filter(
+      (other) => keyOf(other.chat) !== key && other.agentId === entry.sessionId,
+    )
     state.agentId = entry.sessionId
-    chatSelections[String(chatId)] = entry.sessionId
+    chatSelections[key] = entry.sessionId
+    for (const other of moved) {
+      other.agentId = undefined
+      delete chatSelections[keyOf(other.chat)]
+    }
+    // A holder that has not spoken in this process has no conversation to tell, so
+    // its persisted entry is dropped without a notice: uniqueness is the invariant,
+    // and this is the only side of it that has nothing to send to.
+    for (const held of Object.keys(chatSelections)) {
+      if (held !== key && chatSelections[held] === entry.sessionId) delete chatSelections[held]
+    }
     persistChatSelections()
     const title = await conversationTitle(entry)
     const namePart = title !== undefined
@@ -509,12 +541,15 @@ export function apply(ctx: Context, config: Config): void {
       ? ` [${escapeHtml(homeShorten(entry.cwd, homedir()))}]`
       : ''
     const pausedNote = entry.agent === undefined ? ' (paused — resumes on your first message)' : ''
-    await client.sendMessage(chatId, `Selected ${namePart}${cwdPart}.${pausedNote}`)
+    for (const other of moved) {
+      await client.sendMessage(other.chat, `conversation moved to ${describeChat(chat)}`)
+    }
+    await client.sendMessage(chat, `Selected ${namePart}${cwdPart}.${pausedNote}`)
   }
 
   /** Resolve the agent a chat's plain messages target: explicit selection, default, then the single conversation. */
-  async function resolveAgent(chatId: number): Promise<Agent | undefined> {
-    const state = ensureChat(chatId)
+  async function resolveAgent(chat: ChatKey): Promise<Agent | undefined> {
+    const state = ensureChat(chat)
     for (const candidate of [state.agentId, defaultAgentId]) {
       if (candidate === undefined || candidate === '') continue
       return await ensureLiveAgent(SessionId(candidate))
@@ -525,24 +560,25 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /** Send a message, splitting over-long payloads into Telegram-safe chunks. */
-  async function sendChunks(chatId: number, text: string): Promise<void> {
+  async function sendChunks(chat: ChatKey, text: string): Promise<void> {
     for (const chunk of splitMessage(text, maxMessageChars)) {
-      await client.sendMessage(chatId, chunk)
+      await client.sendMessage(chat, chunk)
     }
   }
 
-  /** Register a pending reply for `chatId` on `agent`'s session; call before `agent.followup`. */
-  function registerPending(agent: Agent, chatId: number, messageId: MessageId): void {
+  /** Register a pending reply for `chat` on `agent`'s session; call before `agent.followup`. */
+  function registerPending(agent: Agent, chat: ChatKey, messageId: MessageId): void {
     const sessionId = agent.session.id
+    const key = keyOf(chat)
     let byChat = pendingBySession.get(sessionId)
     if (byChat === undefined) {
       byChat = new Map()
       pendingBySession.set(sessionId, byChat)
     }
-    const existing = byChat.get(chatId)
+    const existing = byChat.get(key)
     if (existing !== undefined) existing.timeoutDispose()
     const entry: PendingReply = {
-      chatId,
+      chat,
       buffer: [],
       startedAt: Date.now(),
       messageId,
@@ -550,39 +586,72 @@ export function apply(ctx: Context, config: Config): void {
       timeoutDispose: () => { /* replaced below */ },
     }
     entry.timeoutDispose = ctx.effect(() => {
-      const timer = setTimeout(() => flush(sessionId, chatId, 'timeout'), replyTimeoutMs)
+      const timer = setTimeout(() => flush(sessionId, chat, 'timeout'), replyTimeoutMs)
       return () => clearTimeout(timer)
     }, 'telegram-control.replyTimeout()')
-    byChat.set(chatId, entry)
+    byChat.set(key, entry)
   }
 
   /** Remove a pending reply and deliver whatever was accumulated. */
-  function flush(sessionId: SessionId, chatId: number, reason: 'idle' | 'timeout'): void {
+  function flush(sessionId: SessionId, chat: ChatKey, reason: 'idle' | 'timeout'): void {
+    const key = keyOf(chat)
     const byChat = pendingBySession.get(sessionId)
-    const entry = byChat?.get(chatId)
+    const entry = byChat?.get(key)
     if (byChat === undefined || entry === undefined) return
-    byChat.delete(chatId)
+    byChat.delete(key)
     if (byChat.size === 0) pendingBySession.delete(sessionId)
     entry.timeoutDispose()
     const text = entry.buffer.join('\n\n').trim()
     const note = reason === 'timeout'
       ? `(agent still busy after ${Math.round((Date.now() - entry.startedAt) / 1000)}s)`
       : '(agent finished without textual output)'
-    void sendChunks(chatId, text === '' ? note : text).catch(logWarn)
+    void sendChunks(chat, text === '' ? note : text).catch(logWarn)
   }
 
   /** Forward one assistant message to every watching chat. */
   function forwardWatching(text: string): void {
-    for (const [chatId, state] of chats) {
-      if (state.watching) void sendChunks(chatId, text).catch(logWarn)
+    for (const state of chats.values()) {
+      if (state.watching) void sendChunks(state.chat, text).catch(logWarn)
     }
+  }
+
+  /**
+   * Where a question or an approval for one agent belongs.
+   *
+   * A request is answered where the agent was picked, not in every chat the bot
+   * can post to: selecting an agent takes it from every previous holder, so its
+   * conversation is unique and this lookup is exact. Only an agent no Telegram
+   * conversation owns — started from the Web UI or the socket — fans out to every
+   * allowed chat, which is what always happened before a conversation could be a
+   * topic. A session two conversations claim is a state selection is meant to make
+   * impossible, and it delivers nothing.
+   */
+  function targetsFor(sessionId: SessionId | undefined): ChatKey[] {
+    const fallback = allowedChatIds.map((chatId) => ({ chatId }))
+    if (sessionId === undefined) return fallback
+    const owners = [...chats.values()].filter((state) => state.agentId === sessionId)
+    if (owners.length === 1) return [owners[0]!.chat]
+    if (owners.length > 1) {
+      // Not a neutral choice: an approval forwarded to a conversation that does
+      // not own the agent lets that conversation authorize its tool calls. So this
+      // refuses to deliver, says which session and which conversations, and lets
+      // the approval time out (or the question fall through to the Web dialog) —
+      // both degrade to something the caller already handles.
+      ctx.logger.error(
+        `telegram-control: ${owners.length} conversations claim agent ${sessionId} ` +
+          `(${owners.map((state) => keyOf(state.chat)).join(', ')}); ` +
+          'no question or approval was delivered for it',
+      )
+      return []
+    }
+    return fallback
   }
 
   /** Edit every forwarded approval message to show the settled outcome. */
   async function updateApprovalMessages(entry: PendingApproval, suffix: string): Promise<void> {
-    for (const { chatId, messageId } of entry.sent) {
+    for (const { chat, messageId } of entry.sent) {
       try {
-        await client.editMessageText(chatId, messageId, `${entry.text}\n\n${suffix}`)
+        await client.editMessageText(chat, messageId, `${entry.text}\n\n${suffix}`)
       } catch (error) {
         ctx.logger.warn(`telegram-control: editing approval message ${messageId} failed: ${describeError(error)}`)
       }
@@ -591,9 +660,9 @@ export function apply(ctx: Context, config: Config): void {
 
   /** Edit every forwarded question message to show the chosen answer. */
   async function updateQuestionMessages(entry: PendingQuestion, suffix: string): Promise<void> {
-    for (const { chatId, messageId } of entry.sent) {
+    for (const { chat, messageId } of entry.sent) {
       try {
-        await client.editMessageText(chatId, messageId, `${entry.text}\n\n${suffix}`)
+        await client.editMessageText(chat, messageId, `${entry.text}\n\n${suffix}`)
       } catch (error) {
         ctx.logger.warn(`telegram-control: editing question message ${messageId} failed: ${describeError(error)}`)
       }
@@ -613,13 +682,18 @@ export function apply(ctx: Context, config: Config): void {
       const token = randomUUID()
       const options = item.options ?? []
       const header = item.header !== undefined ? `${item.header}\n` : ''
+      // Every option is spelled out in the body; when the question has a single
+      // answer the buttons carry the same options, numbered to match. One
+      // builder keeps the numbering and the order identical between the two.
+      const { lines: optionLines, keyboard } = questionOptions(options, token, singleSelect)
       const text = [
         '❓ <b>Question</b>',
         `Agent: ${describeAgentSafe(request.agent)}`,
         `${header}${escapeHtml(item.question)}`,
         item.detail !== undefined && item.detail !== '' ? `\n${escapeHtml(item.detail)}` : '',
+        optionLines.length > 0 ? `\n${optionLines.join('\n')}` : '',
       ].filter(part => part !== '').join('\n')
-      const sent: { chatId: number; messageId: number }[] = []
+      const sent: { chat: ChatKey; messageId: number }[] = []
       const entry: PendingQuestion = {
         resolve: settle,
         text,
@@ -638,15 +712,9 @@ export function apply(ctx: Context, config: Config): void {
         pendingQuestions.set(token, entry)
       }
       try {
-        const keyboard = singleSelect ? {
-          inline_keyboard: [options.map((option, index) => ({
-            text: option.label,
-            callback_data: `question:${token}:${index}`,
-          }))],
-        } : undefined
-        for (const chatId of allowedChatIds) {
-          const result = await client.sendMessage(chatId, text, keyboard === undefined ? {} : { replyMarkup: keyboard })
-          sent.push({ chatId, messageId: result.message_id })
+        for (const chat of targetsFor(request.agent?.session.id)) {
+          const result = await client.sendMessage(chat, text, keyboard === undefined ? {} : { replyMarkup: keyboard })
+          sent.push({ chat, messageId: result.message_id })
         }
       } catch (error) {
         ctx.logger.warn(`telegram-control: forwarding question failed: ${describeError(error)}`)
@@ -665,8 +733,8 @@ export function apply(ctx: Context, config: Config): void {
     // Same gate as messages: a button press only counts from an authorized chat.
     // Tokens are random, but a forwarded approval message would otherwise let
     // anyone who sees it decide; the chat that holds the keyboard must be allowed.
-    const originChatId = query.message?.chat.id
-    if (originChatId === undefined || !allowedChatIds.includes(originChatId)) {
+    const origin = query.message
+    if (origin === undefined || !allowedChatIds.includes(origin.chat.id)) {
       await client.answerCallbackQuery(query.id, 'not authorized')
       return
     }
@@ -719,25 +787,27 @@ export function apply(ctx: Context, config: Config): void {
 
   /** Handle one Telegram message from an authorized chat. */
   async function handleMessage(message: NonNullable<TelegramUpdate['message']>): Promise<void> {
-    const chatId = message.chat.id
     if (message.text === undefined) return
+    const chat = chatKeyOf(message)
     const parsed = parseBotCommand(message.text)
     if (parsed !== undefined) {
-      await handleCommand(chatId, parsed.command, parsed.rawInput)
+      await handleCommand(chat, parsed.command, parsed.rawInput)
     } else {
-      await handlePlain(chatId, message.text)
+      await handlePlain(chat, message.text)
     }
   }
 
   /** Dispatch a parsed bot command. */
-  async function handleCommand(chatId: number, command: string, rawInput: string): Promise<void> {
+  async function handleCommand(chat: ChatKey, command: string, rawInput: string): Promise<void> {
+    // The id, not the topic, is what an operator reads and edits in config.
+    const chatId = chat.chatId
     switch (command) {
       case 'start':
       case 'help':
-        await sendChunks(chatId, helpText())
+        await sendChunks(chat, helpText())
         return
       case 'chatid':
-        await client.sendMessage(chatId, `Your chat id is <code>${chatId}</code>.`)
+        await client.sendMessage(chat, `Your chat id is <code>${chatId}</code>.`)
         return
       case 'status': {
         const entries = await listConversations()
@@ -749,14 +819,14 @@ export function apply(ctx: Context, config: Config): void {
           `conversations: ${entries.length} (${live} live)`,
           `jobs: ${jobs.length}`,
         ]
-        await sendChunks(chatId, lines.join('\n'))
+        await sendChunks(chat, lines.join('\n'))
         return
       }
       case 'agents': {
-        const state = ensureChat(chatId)
+        const state = ensureChat(chat)
         const entries = await listConversations()
         if (entries.length === 0) {
-          await client.sendMessage(chatId, 'No conversations yet. Start one from the Web UI first.')
+          await client.sendMessage(chat, 'No conversations yet. Start one from the Web UI first.')
           return
         }
         const lines: string[] = []
@@ -775,22 +845,22 @@ export function apply(ctx: Context, config: Config): void {
             : 'paused'
           lines.push(`${index + 1}. ${icon} ${namePart}${cwdPart}${selected} — ${statusPart}`)
         }
-        await sendChunks(chatId,
+        await sendChunks(chat,
           `Conversations — pick one with <code>/agent &lt;number&gt;</code> or <code>/agent &lt;name&gt;</code> (paused ones resume on your first message):\n${lines.join('\n')}`)
         return
       }
       case 'agent': {
-        const state = ensureChat(chatId)
+        const state = ensureChat(chat)
         const requested = rawInput.trim()
         if (requested === '') {
           const current = state.agentId
           if (current === undefined) {
-            await client.sendMessage(chatId, 'No agent selected. Use <code>/agents</code> then <code>/agent &lt;number&gt;</code>.')
+            await client.sendMessage(chat, 'No agent selected. Use <code>/agents</code> then <code>/agent &lt;number&gt;</code>.')
           } else {
             const entries = await listConversations()
             const entry = entries.find(candidate => candidate.sessionId === SessionId(current))
             if (entry === undefined) {
-              await client.sendMessage(chatId, `Selected session <code>${escapeHtml(current)}</code> (not found).`)
+              await client.sendMessage(chat, `Selected session <code>${escapeHtml(current)}</code> (not found).`)
             } else {
               const title = await conversationTitle(entry)
               const namePart = title !== undefined
@@ -799,7 +869,7 @@ export function apply(ctx: Context, config: Config): void {
               const cwdPart = entry.cwd !== undefined && entry.cwd !== ''
                 ? ` [${escapeHtml(homeShorten(entry.cwd, homedir()))}]`
                 : ''
-              await client.sendMessage(chatId, `Selected: ${namePart}${cwdPart}`)
+              await client.sendMessage(chat, `Selected: ${namePart}${cwdPart}`)
             }
           }
           return
@@ -808,7 +878,7 @@ export function apply(ctx: Context, config: Config): void {
         // 1) exact session id
         const exact = entries.find(entry => entry.sessionId === SessionId(requested))
         if (exact !== undefined) {
-          await selectEntry(chatId, exact)
+          await selectEntry(chat, exact)
           return
         }
         // 2) 1-based index into the /agents listing
@@ -816,7 +886,7 @@ export function apply(ctx: Context, config: Config): void {
         if (Number.isSafeInteger(index) && index >= 1 && index <= entries.length) {
           const entry = entries[index - 1]
           if (entry !== undefined) {
-            await selectEntry(chatId, entry)
+            await selectEntry(chat, entry)
             return
           }
         }
@@ -830,7 +900,7 @@ export function apply(ctx: Context, config: Config): void {
           }
         }
         if (matches.length === 1) {
-          await selectEntry(chatId, matches[0]!)
+          await selectEntry(chat, matches[0]!)
           return
         }
         if (matches.length > 1) {
@@ -839,75 +909,75 @@ export function apply(ctx: Context, config: Config): void {
             const label = (await conversationTitle(match)) ?? shortSessionId(match.sessionId)
             candidateLines.push(`• ${escapeHtml(label)}`)
           }
-          await client.sendMessage(chatId,
+          await client.sendMessage(chat,
             `Multiple conversations match "<code>${escapeHtml(requested)}</code>":\n${candidateLines.join('\n')}\nUse <code>/agent &lt;number&gt;</code> to pick one.`)
           return
         }
-        await client.sendMessage(chatId,
+        await client.sendMessage(chat,
           `No conversation matches "<code>${escapeHtml(requested)}</code>". Use <code>/agents</code> to list them.`)
         return
       }
       case 'jobs': {
         const service = jobsService()
         if (service === undefined) {
-          await client.sendMessage(chatId, 'jobs service unavailable in this profile.')
+          await client.sendMessage(chat, 'jobs service unavailable in this profile.')
           return
         }
         const jobs = service.list()
         if (jobs.length === 0) {
-          await client.sendMessage(chatId, 'No background jobs.')
+          await client.sendMessage(chat, 'No background jobs.')
           return
         }
         const lines = jobs.map(job =>
           `• <code>${escapeHtml(job.id)}</code> — ${job.kind} — ${job.status} — ${escapeHtml(job.label)}`)
-        await sendChunks(chatId, `Background jobs:\n${lines.join('\n')}`)
+        await sendChunks(chat, `Background jobs:\n${lines.join('\n')}`)
         return
       }
       case 'kill': {
         const service = jobsService()
         const jobId = rawInput.trim()
         if (service === undefined) {
-          await client.sendMessage(chatId, 'jobs service unavailable in this profile.')
+          await client.sendMessage(chat, 'jobs service unavailable in this profile.')
           return
         }
         if (jobId === '') {
-          await client.sendMessage(chatId, 'Usage: <code>/kill &lt;job id&gt;</code>')
+          await client.sendMessage(chat, 'Usage: <code>/kill &lt;job id&gt;</code>')
           return
         }
         const outcome = service.kill(jobId as JobId, undefined, 'telegram-control')
-        await client.sendMessage(chatId, outcome === 'requested'
+        await client.sendMessage(chat, outcome === 'requested'
           ? `Kill requested for <code>${escapeHtml(jobId)}</code>.`
           : `Job <code>${escapeHtml(jobId)}</code> was already finished.`)
         return
       }
       case 'cancel': {
-        const state = ensureChat(chatId)
+        const state = ensureChat(chat)
         const selectedId = state.agentId
         const liveAgents = ctx.agents.list()
         const agent = selectedId !== undefined
           ? ctx.agents.get(SessionId(selectedId))
           : liveAgents.length === 1 ? liveAgents[0] : undefined
         if (agent === undefined) {
-          await client.sendMessage(chatId,
+          await client.sendMessage(chat,
             'No live agent to cancel. Send a message to resume one first, then <code>/cancel</code>.')
           return
         }
         agent.cancel({ kind: 'user' })
-        await client.sendMessage(chatId, `Cancellation requested for ${describeAgent(agent)}.`)
+        await client.sendMessage(chat, `Cancellation requested for ${describeAgent(agent)}.`)
         return
       }
       case 'watch': {
-        ensureChat(chatId).watching = true
-        await client.sendMessage(chatId, 'Watching: live agent output will be forwarded to this chat. <code>/unwatch</code> to stop.')
+        ensureChat(chat).watching = true
+        await client.sendMessage(chat, 'Watching: live agent output will be forwarded to this chat. <code>/unwatch</code> to stop.')
         return
       }
       case 'unwatch': {
-        ensureChat(chatId).watching = false
-        await client.sendMessage(chatId, 'Watching stopped.')
+        ensureChat(chat).watching = false
+        await client.sendMessage(chat, 'Watching stopped.')
         return
       }
       default:
-        await client.sendMessage(chatId, `Unknown command <code>/${escapeHtml(command)}</code>. Send <code>/help</code> for the command list.`)
+        await client.sendMessage(chat, `Unknown command <code>/${escapeHtml(command)}</code>. Send <code>/help</code> for the command list.`)
     }
   }
 
@@ -916,13 +986,14 @@ export function apply(ctx: Context, config: Config): void {
   // that same attempt rather than creating a second one and overwriting the
   // selection. Only ever one promise per chat is installed, so the one that
   // finishes is the one that clears the entry.
-  const openingAgents = new Map<number, Promise<Agent | undefined>>()
+  const openingAgents = new Map<string, Promise<Agent | undefined>>()
 
   /** The chat's agent, opening a conversation when the host allows one. */
-  async function resolveOrOpenAgent(chatId: number): Promise<Agent | undefined> {
-    const existing = await resolveAgent(chatId)
+  async function resolveOrOpenAgent(chat: ChatKey): Promise<Agent | undefined> {
+    const key = keyOf(chat)
+    const existing = await resolveAgent(chat)
     if (existing !== undefined) return existing
-    const inFlight = openingAgents.get(chatId)
+    const inFlight = openingAgents.get(key)
     if (inFlight !== undefined) return await inFlight
     // A host that exposes its own sessions facade can open a conversation here,
     // with that host's workspace, route default model and preset — the same
@@ -939,21 +1010,21 @@ export function apply(ctx: Context, config: Config): void {
         // Select only once the conversation really exists, so a failed creation
         // leaves no chat pointing at a session that is not there.
         if (agent === undefined) return undefined
-        await selectEntry(chatId, toEntry(agent))
+        await selectEntry(chat, toEntry(agent))
         return agent
       } finally {
-        openingAgents.delete(chatId)
+        openingAgents.delete(key)
       }
     })()
-    openingAgents.set(chatId, opening)
+    openingAgents.set(key, opening)
     return await opening
   }
 
-  /** Send a plain message as a follow-up to the chat's selected agent. */
-  async function handlePlain(chatId: number, text: string): Promise<void> {
-    const agent = await resolveOrOpenAgent(chatId)
+  /** Send a plain message as a follow-up to the conversation's selected agent. */
+  async function handlePlain(chat: ChatKey, text: string): Promise<void> {
+    const agent = await resolveOrOpenAgent(chat)
     if (agent === undefined) {
-      await client.sendMessage(chatId,
+      await client.sendMessage(chat,
         'No conversation selected. Use <code>/agents</code> then <code>/agent &lt;number&gt;</code>, or start one from the Web UI.')
       return
     }
@@ -966,17 +1037,17 @@ export function apply(ctx: Context, config: Config): void {
       content: [{ type: 'text', text }],
     })
     // Register before followup so the turn's events land in the reply buffer.
-    registerPending(agent, chatId, message.id)
+    registerPending(agent, chat, message.id)
     try {
       agent.followup(message)
     } catch (error) {
       // A follow-up that fails synchronously (agent disposed mid-flight) would
       // otherwise leave the pending entry to time out; close it immediately.
-      flush(sessionId, chatId, 'idle')
+      flush(sessionId, chat, 'idle')
       throw error
     }
-    void client.sendChatAction(chatId, 'typing').catch(logWarn)
-    ctx.logger.info(`telegram-control: follow-up queued for agent ${sessionId} from chat ${chatId}`)
+    void client.sendChatAction(chat, 'typing').catch(logWarn)
+    ctx.logger.info(`telegram-control: follow-up queued for agent ${sessionId} from chat ${keyOf(chat)}`)
   }
 
   /** Handle one update from the poll loop; never throws. */
@@ -991,11 +1062,14 @@ export function apply(ctx: Context, config: Config): void {
     }
     const message = update.message
     if (message === undefined || message.text === undefined) return
+    // The allowlist stays a decision about the chat; the topic only decides which
+    // conversation the message — and its reply — belongs to.
     const chatId = message.chat.id
+    const chat = chatKeyOf(message)
     const authorized = allowedChatIds.includes(chatId)
     if (!authorized) {
       if (message.text.trimStart().startsWith('/')) {
-        await client.sendMessage(chatId,
+        await client.sendMessage(chat,
           `Not authorized. Add chat id <code>${chatId}</code> to <code>allowedChatIds</code> (or <code>DSH_TELEGRAM_ALLOWED_CHATS</code>).`)
       }
       return
@@ -1005,7 +1079,7 @@ export function apply(ctx: Context, config: Config): void {
     } catch (error) {
       ctx.logger.warn(`telegram-control: handling message from chat ${chatId} failed: ${describeError(error)}`)
       try {
-        await client.sendMessage(chatId, `⚠️ Handling failed: ${escapeHtml(describeError(error))}`)
+        await client.sendMessage(chat, `⚠️ Handling failed: ${escapeHtml(describeError(error))}`)
       } catch {
         // The failure report itself failed; the log above is the record.
       }
@@ -1063,7 +1137,7 @@ export function apply(ctx: Context, config: Config): void {
     web: Promise<ApprovalOutcome>,
   ): Promise<ApprovalOutcome> {
     const token = randomUUID()
-    const sent: { chatId: number; messageId: number }[] = []
+    const sent: { chat: ChatKey; messageId: number }[] = []
     const { promise, resolve } = Promise.withResolvers<ApprovalOutcome>()
     let settled = false
     const settle = (outcome: ApprovalOutcome): void => {
@@ -1107,9 +1181,9 @@ export function apply(ctx: Context, config: Config): void {
           { text: '❌ Reject', callback_data: `reject:${token}` },
         ]],
       }
-      for (const chatId of allowedChatIds) {
-        const result = await client.sendMessage(chatId, text, { replyMarkup: keyboard })
-        sent.push({ chatId, messageId: result.message_id })
+      for (const chat of targetsFor(req.agent.session.id)) {
+        const result = await client.sendMessage(chat, text, { replyMarkup: keyboard })
+        sent.push({ chat, messageId: result.message_id })
       }
       ctx.logger.info(`telegram-control: approval request ${token.slice(0, 8)} for ${req.toolName} forwarded`)
     } catch (error) {
@@ -1166,10 +1240,9 @@ export function apply(ctx: Context, config: Config): void {
     } else if (event.type === 'turn/end') {
       const byChat = pendingBySession.get(session.id)
       if (byChat === undefined) return
-      for (const chatId of [...byChat.keys()]) {
-        const entry = byChat.get(chatId)
-        if (entry !== undefined && entry.turn === event.data.turn) {
-          flush(session.id, chatId, 'idle')
+      for (const entry of byChat.values()) {
+        if (entry.turn === event.data.turn) {
+          flush(session.id, entry.chat, 'idle')
         }
       }
     } else if (event.type === 'session/title') {
@@ -1180,7 +1253,7 @@ export function apply(ctx: Context, config: Config): void {
       const notice = toolCallPreview(event.data.name, event.data.arguments)
       for (const entry of byChat.values()) {
         if (entry.turn === event.data.turn) {
-          void client.sendMessage(entry.chatId, notice).catch(logWarn)
+          void client.sendMessage(entry.chat, notice).catch(logWarn)
         }
       }
     }
@@ -1201,10 +1274,10 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('agent/inbox/discarded', (payload) => {
     const byChat = pendingBySession.get(payload.agent.session.id)
     if (byChat === undefined) return
-    for (const [chatId, entry] of byChat) {
+    for (const entry of byChat.values()) {
       if (entry.messageId !== payload.message.id) continue
       entry.buffer.push('⚠️ message was discarded before the agent processed it')
-      flush(payload.agent.session.id, chatId, 'idle')
+      flush(payload.agent.session.id, entry.chat, 'idle')
     }
   })
 
@@ -1215,10 +1288,10 @@ export function apply(ctx: Context, config: Config): void {
     const byChat = pendingBySession.get(sessionId)
     if (byChat === undefined) return
     if (payload.status === 'idle') {
-      for (const chatId of [...byChat.keys()]) flush(sessionId, chatId, 'idle')
+      for (const entry of byChat.values()) flush(sessionId, entry.chat, 'idle')
     } else if (payload.status === 'running') {
       for (const entry of byChat.values()) {
-        void client.sendChatAction(entry.chatId, 'typing').catch(logWarn)
+        void client.sendChatAction(entry.chat, 'typing').catch(logWarn)
       }
     }
   })
@@ -1241,7 +1314,7 @@ export function apply(ctx: Context, config: Config): void {
     pendingBySession.delete(sessionId)
     for (const entry of byChat.values()) {
       entry.timeoutDispose()
-      void client.sendMessage(entry.chatId, '⚠️ agent was disposed while working').catch(logWarn)
+      void client.sendMessage(entry.chat, '⚠️ agent was disposed while working').catch(logWarn)
     }
   })
 

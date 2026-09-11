@@ -74,6 +74,37 @@ export interface ParsedApprovalCallback {
  * @returns the parsed choice, or `undefined` for stale or malformed data.
  */
 export declare function parseApprovalCallback(data: string): ParsedApprovalCallback | undefined;
+/** One option of a user question, as the question seam declares it. */
+export interface QuestionOption {
+    label: string;
+    /** Optional extra context; the body shows it, a button never does. */
+    description?: string;
+}
+/** The buttons for one question: one option per row, in the order the body lists them. */
+export interface QuestionKeyboard {
+    inline_keyboard: {
+        text: string;
+        callback_data: string;
+    }[][];
+}
+/**
+ * How one question's options appear in Telegram: body lines, and buttons when
+ * the question has a single answer to give.
+ *
+ * The body carries every option in full — escaped label, then the description
+ * when there is one — because a button shows only a clipped label. The number is
+ * what ties the two together, so it is in both and in the same order. Multi
+ * select and free-text questions get the list and no buttons: there is no single
+ * option a press could mean.
+ *
+ * @param options - the question's options, in the order the caller declared.
+ * @param token - the request token embedded in every button's callback_data.
+ * @param singleSelect - whether one press answers the question.
+ */
+export declare function questionOptions(options: readonly QuestionOption[], token: string, singleSelect: boolean): {
+    lines: string[];
+    keyboard: QuestionKeyboard | undefined;
+};
 /** One parsed question-button callback: the request token and the option index. */
 export interface ParsedQuestionCallback {
     token: string;
