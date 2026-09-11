@@ -274,7 +274,7 @@ try {
   const strangerAnswer = tgCallbackAnswers.find(a => a.callback_query_id.startsWith('cb-stranger-'))
   const legitAnswer = tgCallbackAnswers.find(a => /^cb-\d+$/.test(a.callback_query_id))
   check('phase C: button press from a non-allowlisted chat is refused', strangerAnswer !== undefined && strangerAnswer.text === 'not authorized')
-  check('phase C: callback query answered', legitAnswer !== undefined && legitAnswer.text === '已批准')
+  check('phase C: callback query answered', legitAnswer !== undefined && legitAnswer.text === 'Approved')
   check('phase C: approval message edited with the outcome', tgEdits.some(m => m.text.includes('Approved')))
   ok = ok && await waitFor(child, bootLog, () => llmRequests.length >= llmBeforeApproval + 1, 'the post-approval model call')
   check('phase C: approved tool call continued the turn', llmRequests.length >= llmBeforeApproval + 1)
@@ -290,9 +290,9 @@ try {
     && questionMsg.text.includes('Question') && questionMsg.text.includes('Approve the smoke plan'))
   check('phase C2: question carries option buttons', questionMsg !== undefined
     && questionMsg.reply_markup?.inline_keyboard?.flat().some(b => b.callback_data?.startsWith('question:')))
-  ok = ok && await waitFor(child, bootLog, () => tgCallbackAnswers.some(a => a.text === '已选择'), 'the question callback to be answered')
-  check('phase C2: question callback answered', tgCallbackAnswers.some(a => a.text === '已选择'))
-  check('phase C2: question message edited with the answer', tgEdits.some(m => m.text.includes('已选择')))
+  ok = ok && await waitFor(child, bootLog, () => tgCallbackAnswers.some(a => a.text === 'Selected'), 'the question callback to be answered')
+  check('phase C2: question callback answered', tgCallbackAnswers.some(a => a.text === 'Selected'))
+  check('phase C2: question message edited with the answer', tgEdits.some(m => m.text.includes('Selected')))
   ok = ok && await waitFor(child, bootLog, () => llmRequests.length >= llmBeforeQuestion + 1, 'the post-question model call')
   check('phase C2: answered question continued the turn', llmRequests.length >= llmBeforeQuestion + 1)
 } finally {

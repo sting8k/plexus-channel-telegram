@@ -35,3 +35,5 @@ No plugin behaviour, configuration or message rendering changed.
   no 0.1.2 API was ever exercised.
 - A host that exposes `plexusSessions` opens a conversation on the first plain
   message from an allowlisted chat; hosts without it keep the Web-UI-first reply.
+
+- Command menu, question and approval acknowledgements are in English (upstream: Chinese).
