@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { escapeHtml, homeShorten, parseApprovalCallback, parseBotCommand, parseQuestionCallback, renderUptime, splitMessage, trimReasoning } from '../lib/format.js'
+import { escapeHtml, homeShorten, markdownToTelegramHtml, parseApprovalCallback, parseBotCommand, parseQuestionCallback, renderUptime, splitMessage, toolCallPreview, trimReasoning } from '../lib/format.js'
 
 test('escapeHtml escapes HTML metacharacters', () => {
   assert.equal(escapeHtml('<b>&"quoted"</b>'), '&lt;b&gt;&amp;&quot;quoted&quot;&lt;/b&gt;')
@@ -126,4 +126,21 @@ test('parseQuestionCallback rejects stale or malformed data', () => {
   assert.equal(parseQuestionCallback('question::0'), undefined)
   assert.equal(parseQuestionCallback('Question:abc:1'), undefined)
   assert.equal(parseQuestionCallback('approve:abc'), undefined)
+})
+
+test('markdownToTelegramHtml renders the Telegram subset and escapes the rest', () => {
+  const md = '# Title\n\nSome **bold** and *it* and `a<b`.\n- one\n- two\n\n```sh\nls -la && echo "<x>"\n```\nSee [docs](https://example.com/a?b=1).'
+  assert.equal(markdownToTelegramHtml(md),
+    '<b>Title</b>\n\nSome <b>bold</b> and <i>it</i> and <code>a&lt;b</code>.\n• one\n• two\n\n<pre>ls -la &amp;&amp; echo &quot;&lt;x&gt;&quot;</pre>\nSee <a href="https://example.com/a?b=1">docs</a>.')
+})
+
+test('markdownToTelegramHtml leaves snake_case and 2*3*4 alone', () => {
+  assert.equal(markdownToTelegramHtml('use file_name_here and 2*3*4'), 'use file_name_here and 2*3*4')
+})
+
+test('toolCallPreview shows the command, clipped, and falls back to the name', () => {
+  assert.equal(toolCallPreview('bash', '{"command":"ls -la;  echo hi","description":"x"}'), '🔧 <code>bash</code> <code>ls -la; echo hi</code>')
+  assert.equal(toolCallPreview('bash', `{"command":"${'x'.repeat(200)}"}`).length < 160, true)
+  assert.equal(toolCallPreview('think', '{"thought":"..."}'), '🔧 <code>think</code>')
+  assert.equal(toolCallPreview('bash', 'not json'), '🔧 <code>bash</code>')
 })

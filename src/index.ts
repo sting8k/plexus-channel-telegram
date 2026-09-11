@@ -36,7 +36,7 @@ import {
   type TelegramCallbackQuery,
   type TelegramUpdate,
 } from './client.ts'
-import { escapeHtml, homeShorten, parseApprovalCallback, parseBotCommand, parseQuestionCallback, renderUptime, splitMessage, trimReasoning } from './format.ts'
+import { escapeHtml, homeShorten, markdownToTelegramHtml, parseApprovalCallback, parseBotCommand, parseQuestionCallback, renderUptime, splitMessage, toolCallPreview, trimReasoning } from './format.ts'
 
 export const name = 'telegram-control'
 export const inject = ['agents', 'sessions']
@@ -1153,14 +1153,15 @@ export function apply(ctx: Context, config: Config): void {
       if (byChat !== undefined) {
         // Only buffer output from OUR follow-up's own turn: a GUI-initiated
         // turn that runs while a reply is pending must not leak into it.
-        // Escape at the buffer boundary: the final send uses Telegram's HTML
-        // parse mode, and unescaped `&<>` in agent text is a 400 the flush
-        // would otherwise swallow silently.
+        // Render at the buffer boundary: the final send uses Telegram's HTML
+        // parse mode; the model's Markdown becomes the HTML subset Telegram
+        // shows, and everything else is escaped so no reply is a 400.
+        const html = markdownToTelegramHtml(text)
         for (const entry of byChat.values()) {
-          if (entry.turn === event.data.turn) entry.buffer.push(escapeHtml(text))
+          if (entry.turn === event.data.turn) entry.buffer.push(html)
         }
       } else {
-        forwardWatching(escapeHtml(text))
+        forwardWatching(markdownToTelegramHtml(text))
       }
     } else if (event.type === 'turn/end') {
       const byChat = pendingBySession.get(session.id)
@@ -1176,7 +1177,7 @@ export function apply(ctx: Context, config: Config): void {
     } else if (event.type === 'tool/call' && showToolCalls) {
       const byChat = pendingBySession.get(session.id)
       if (byChat === undefined) return
-      const notice = `🔧 <code>${escapeHtml(event.data.name)}</code>`
+      const notice = toolCallPreview(event.data.name, event.data.arguments)
       for (const entry of byChat.values()) {
         if (entry.turn === event.data.turn) {
           void client.sendMessage(entry.chatId, notice).catch(logWarn)

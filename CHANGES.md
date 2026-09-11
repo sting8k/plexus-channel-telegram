@@ -37,3 +37,4 @@ No plugin behaviour, configuration or message rendering changed.
   message from an allowlisted chat; hosts without it keep the Web-UI-first reply.
 
 - Command menu, question and approval acknowledgements are in English (upstream: Chinese).
+- Replies render Markdown (code, bold, italic, links, headings, lists) as Telegram HTML instead of escaped text; tool-call notices include the command/path clipped to 120 chars.

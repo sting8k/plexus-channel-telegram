@@ -6,6 +6,15 @@
 /** Escape text so it is safe inside Telegram's HTML parse mode. */
 export declare function escapeHtml(text: string): string;
 /**
+ * Render the subset of Markdown that Telegram's HTML parse mode can show:
+ * fenced and inline code, bold, italic, links, headings
+ * (as bold) and list markers (as bullets). Everything else is escaped text —
+ * a model reply must never produce a 400 from Telegram.
+ */
+export declare function markdownToTelegramHtml(markdown: string): string;
+/** One-line preview of a tool call for the chat: the tool name plus its command or path, clipped. */
+export declare function toolCallPreview(name: string, rawArguments: string, maxChars?: number): string;
+/**
  * Split one message into Telegram-safe chunks (hard cap `max` chars each).
  * Prefers newline boundaries; a single over-long line is hard-split.
  * @param text - the full message to split.
