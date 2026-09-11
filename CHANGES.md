@@ -33,3 +33,5 @@ No plugin behaviour, configuration or message rendering changed.
 - The previous smoke pass was a false green: the CLI was 0.1.2 but the plugin
   resolved its imports from this package's own 0.1.0-rc.6 development closure, so
   no 0.1.2 API was ever exercised.
+- A host that exposes `plexusSessions` opens a conversation on the first plain
+  message from an allowlisted chat; hosts without it keep the Web-UI-first reply.

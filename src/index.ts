@@ -367,14 +367,17 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /** All conversations: live agents plus persisted sessions, most recent first. */
+  /** How a live agent appears as a conversation, in the lister and elsewhere. */
+  const toEntry = (agent: Agent): ConversationEntry => ({
+    sessionId: agent.session.id,
+    agent,
+    cwd: agent.session.header.cwd,
+    createdAt: agent.session.header.createdAt,
+  })
+
   async function listConversations(): Promise<ConversationEntry[]> {
     const agents = ctx.agents.list()
-    const entries: ConversationEntry[] = agents.map(agent => ({
-      sessionId: agent.session.id,
-      agent,
-      cwd: agent.session.header.cwd,
-      createdAt: agent.session.header.createdAt,
-    }))
+    const entries: ConversationEntry[] = agents.map(toEntry)
     const service = persistence()
     if (service !== undefined) {
       try {
@@ -908,9 +911,47 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  // The poll loop dispatches without awaiting, so two messages from one chat can
+  // arrive together. Only the first may open a conversation; the second waits for
+  // that same attempt rather than creating a second one and overwriting the
+  // selection. Only ever one promise per chat is installed, so the one that
+  // finishes is the one that clears the entry.
+  const openingAgents = new Map<number, Promise<Agent | undefined>>()
+
+  /** The chat's agent, opening a conversation when the host allows one. */
+  async function resolveOrOpenAgent(chatId: number): Promise<Agent | undefined> {
+    const existing = await resolveAgent(chatId)
+    if (existing !== undefined) return existing
+    const inFlight = openingAgents.get(chatId)
+    if (inFlight !== undefined) return await inFlight
+    // A host that exposes its own sessions facade can open a conversation here,
+    // with that host's workspace, route default model and preset — the same
+    // semantics its own UI has. A host that does not gets no conversation.
+    const starter = ctx.get('plexusSessions') as { start(): Promise<string> } | undefined
+    if (starter === undefined) return undefined
+    const opening = (async (): Promise<Agent | undefined> => {
+      try {
+        // The host mints the identifier: it owns the id policy, so a session
+        // opened here is the same kind of session, visible to the same RPC, as
+        // one opened from its own UI.
+        const opened = await starter.start()
+        const agent = ctx.agents.get(SessionId(opened))
+        // Select only once the conversation really exists, so a failed creation
+        // leaves no chat pointing at a session that is not there.
+        if (agent === undefined) return undefined
+        await selectEntry(chatId, toEntry(agent))
+        return agent
+      } finally {
+        openingAgents.delete(chatId)
+      }
+    })()
+    openingAgents.set(chatId, opening)
+    return await opening
+  }
+
   /** Send a plain message as a follow-up to the chat's selected agent. */
   async function handlePlain(chatId: number, text: string): Promise<void> {
-    const agent = await resolveAgent(chatId)
+    const agent = await resolveOrOpenAgent(chatId)
     if (agent === undefined) {
       await client.sendMessage(chatId,
         'No conversation selected. Use <code>/agents</code> then <code>/agent &lt;number&gt;</code>, or start one from the Web UI.')
