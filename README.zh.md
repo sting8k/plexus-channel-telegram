@@ -37,13 +37,13 @@ dsh 里一切都是插件——这是一个 Cordis 函数插件，用长轮询�
 2. 把插件装进某个 profile。可以从本仓库装：
 
    ```sh
-   dsh plugin --profile web add github:jackControls/dsh-telegram-control
+   dsh plugin --profile web add github:sting8k/plexus-channel-telegram
    ```
 
    或从本地目录装：
 
    ```sh
-   dsh plugin --profile web add /path/to/dsh-telegram-control
+   dsh plugin --profile web add /path/to/plexus-channel-telegram
    ```
 
    （把 `web` 换成你实际使用的 profile。该包声明了 `dsh.bundle`，所以 `dsh plugin add` 会自动挂成 profile 的一个 layer，不需要手改 `cordis.patch.yml`。`lib/` 已提交，git 安装无需构建步骤。）
@@ -66,7 +66,7 @@ dsh 里一切都是插件——这是一个 Cordis 函数插件，用长轮询�
 ```yaml
 - insert:
     - id: telegram-control
-      name: 'dsh-telegram-control'
+      name: '@plexus/channel-telegram'
       config:
         # 可选：在这里写死配置，而不是用环境变量
         token: '123456:ABC-DEF...'

@@ -1,5 +1,5 @@
 {
-  "name": "dsh-telegram-control",
+  "name": "@plexus/channel-telegram",
   "version": "0.1.0",
   "description": "Remote-control plugin for DeepSeek Harness (dsh): drive agents, jobs and status from a Telegram bot",
   "type": "module",
@@ -72,12 +72,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jackControls/dsh-telegram-control.git",
+    "url": "git+https://github.com/sting8k/plexus-channel-telegram.git",
     "directory": ""
   },
-  "homepage": "https://github.com/jackControls/dsh-telegram-control",
+  "homepage": "https://github.com/sting8k/plexus-channel-telegram",
   "bugs": {
-    "url": "https://github.com/jackControls/dsh-telegram-control/issues"
+    "url": "https://github.com/sting8k/plexus-channel-telegram/issues"
   },
   "scripts": {
     "build": "tsc",

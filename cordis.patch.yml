@@ -1,5 +1,5 @@
-# dsh-telegram-control bundle patch: mounted automatically when this package is
-# installed into a profile (`dsh plugin add dsh-telegram-control`). The plugin
+# @plexus/channel-telegram bundle patch: mounted automatically when this package is
+# installed into a profile (`dsh plugin add @plexus/channel-telegram`). The plugin
 # reads its token and chat allowlist from the environment when config leaves
 # them unset, so no secret needs to live in a file:
 #
@@ -10,10 +10,10 @@
 #
 #   - insert:
 #       - id: telegram-control
-#         name: 'dsh-telegram-control'
+#         name: '@plexus/channel-telegram'
 #         config:
 #           token: '123456:ABC-DEF'
 #           allowedChatIds: [123456789]
 - insert:
     - id: telegram-control
-      name: 'dsh-telegram-control'
+      name: '@plexus/channel-telegram'

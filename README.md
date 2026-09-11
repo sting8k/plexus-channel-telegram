@@ -1,4 +1,6 @@
-# dsh-telegram-control
+# plexus-channel-telegram
+
+Plexus fork of [jackControls/dsh-telegram-control](https://github.com/jackControls/dsh-telegram-control) (MIT). Upstream is tracked as the `upstream` remote; local changes are listed in CHANGES.md.
 
 Remote-control plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).
 Runs a Telegram bot **inside the harness process** so you can drive your agents, jobs, and harness
@@ -39,13 +41,13 @@ Bot API over long-polling with zero runtime dependencies beyond the harness itse
 2. Install the plugin into a profile. Either from this repository
 
    ```sh
-   dsh plugin --profile web add github:jackControls/dsh-telegram-control
+   dsh plugin --profile web add github:sting8k/plexus-channel-telegram
    ```
 
    or, from a local checkout:
 
    ```sh
-   dsh plugin --profile web add /path/to/dsh-telegram-control
+   dsh plugin --profile web add /path/to/plexus-channel-telegram
    ```
 
    (Replace `web` with the profile you run. The package declares `dsh.bundle`, so `dsh plugin add`
@@ -69,7 +71,7 @@ If you prefer to mount it by hand, add a row to your profile's `cordis.patch.yml
 ```yaml
 - insert:
     - id: telegram-control
-      name: 'dsh-telegram-control'
+      name: '@plexus/channel-telegram'
       config:
         # optional: pin values here instead of the environment
         token: '123456:ABC-DEF...'
