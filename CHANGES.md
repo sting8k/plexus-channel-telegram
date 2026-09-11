@@ -17,8 +17,9 @@ Upstream is the `upstream` remote; pull fixes from there when useful.
   `tests/smoke.mjs` into `tests/fakes.mjs`, exported as
   `@plexus/channel-telegram/testing`. Both bind port 0 and report the port they
   were given, return their observations, and close idempotently, so a harness can
-  drive this plugin without re-implementing a Bot API and two runs cannot
-  collide on a fixed port. Importing the module starts nothing.
+  drive this plugin without re-implementing a Bot API. The two fake endpoints no
+  longer pick fixed ports, so two harnesses no longer collide on them — the
+  smoke's web port is still fixed at 3188. Importing the module starts nothing.
 - Smoke test now imports those helpers and still passes 33/33.
 - Declare `plexus.channel = telegram`, so a host can tell which channel a package
   provides without knowing the package by name.

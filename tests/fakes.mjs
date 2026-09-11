@@ -21,8 +21,9 @@ import http from 'node:http'
  *   from elsewhere is refused without settling anything.
  * @param options.pressDelayMs - how long to wait before pressing a button, so
  *   the message is observable first.
- * @returns the server, its base URL, the writable update queue, and what was
- *   observed. `close()` is idempotent and awaitable.
+ * @returns the endpoint it bound (port and base URL), the writable update queue,
+ *   what was observed, and a `close()` that cancels scheduled presses and awaits
+ *   one shared shutdown.
  */
 export async function startFakeTelegram(options = {}) {
   const { chatId, strangerId, pressDelayMs = 400 } = options
@@ -36,6 +37,17 @@ export async function startFakeTelegram(options = {}) {
   const commands = [] // setMyCommands payloads
   const pollQueries = [] // getUpdates query strings
   let polls = 0
+  // Scheduled button presses. They mutate `queue` when they fire, so close has
+  // to own them: a press that lands after disposal would write to a queue nobody
+  // will read and keep the process alive on a pending timer.
+  const pending = new Set()
+  const schedule = (fire, afterMs) => {
+    const timer = setTimeout(() => {
+      pending.delete(timer)
+      fire()
+    }, afterMs)
+    pending.add(timer)
+  }
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1')
@@ -71,7 +83,7 @@ export async function startFakeTelegram(options = {}) {
               data: approveButton.callback_data,
             },
           })
-          setTimeout(() => {
+          schedule(() => {
             queue.push({
               update_id: 10_000 + approvals.length,
               callback_query: {
@@ -86,7 +98,7 @@ export async function startFakeTelegram(options = {}) {
           const questionButton = buttons.find(b => b.callback_data?.startsWith('question:'))
           if (questionButton !== undefined) {
             questions.push(payload)
-            setTimeout(() => {
+            schedule(() => {
               queue.push({
                 update_id: 20_000 + questions.length,
                 callback_query: {
@@ -135,7 +147,17 @@ export async function startFakeTelegram(options = {}) {
   })
 
   await listenOnFreePort(server)
-  let closed = false
+  // One shutdown, however many callers ask: a second `close()` returns the same
+  // promise rather than resolving early against a server that is still up.
+  let closing
+  const close = () => {
+    closing ??= (async () => {
+      for (const timer of pending) clearTimeout(timer)
+      pending.clear()
+      await new Promise((done) => server.close(() => done()))
+    })()
+    return closing
+  }
   return {
     port: server.address().port,
     baseUrl: `http://127.0.0.1:${server.address().port}`,
@@ -153,12 +175,8 @@ export async function startFakeTelegram(options = {}) {
       /** How many getUpdates calls the bot has made so far. */
       pollCount: () => polls,
     },
-    /** Stop serving. Safe to call twice, and to await. */
-    close: async () => {
-      if (closed) return
-      closed = true
-      await new Promise((done) => server.close(() => done()))
-    },
+    /** Stop serving and cancel scheduled presses. Concurrent callers await the same shutdown. */
+    close,
   }
 }
 
@@ -169,8 +187,8 @@ export async function startFakeTelegram(options = {}) {
  * turns a prompt asking for the approval or the question test into the matching
  * tool call so those flows can be driven without a real model.
  *
- * @returns the server, its base URL, the request bodies it received, and a
- *   `close()` that is idempotent and awaitable.
+ * @returns the endpoint it bound (port and base URL), the request bodies it
+ *   received, and a `close()` that awaits one shared shutdown.
  */
 export async function startFakeLlm() {
   const requests = []
@@ -235,17 +253,17 @@ export async function startFakeLlm() {
   })
 
   await listenOnFreePort(server)
-  let closed = false
+  let closing
+  const close = () => {
+    closing ??= new Promise((done) => server.close(() => done()))
+    return closing
+  }
   return {
     port: server.address().port,
     baseUrl: `http://127.0.0.1:${server.address().port}`,
     requests,
-    /** Stop serving. Safe to call twice, and to await. */
-    close: async () => {
-      if (closed) return
-      closed = true
-      await new Promise((done) => server.close(() => done()))
-    },
+    /** Stop serving. Concurrent callers await the same shutdown. */
+    close,
   }
 }
 
