@@ -200,6 +200,7 @@ export async function startFakeLlm(options = {}) {
   const {
     approvalCommand = 'echo hi > /tmp/tg-approval-smoke',
     approvalSandboxPermissions = 'workspace-write',
+    slowTurnMs = 5_000,
   } = options
   const requests = []
   const server = http.createServer((req, res) => {
@@ -255,8 +256,14 @@ export async function startFakeLlm(options = {}) {
             { id: 'mock-2', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content }, finish_reason: null }] },
             { id: 'mock-3', object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
           ]
-        for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`)
-        res.end('data: [DONE]\n\n')
+        // A prompt can ask for a slow turn: the typing keepalive refreshes every few
+        // seconds, so a turn that answers instantly cannot show it at work at all.
+        const writeChunks = () => {
+          for (const chunk of chunks) res.write(`data: ${JSON.stringify(chunk)}\n\n`)
+          res.end('data: [DONE]\n\n')
+        }
+        if (lastUserText.includes('run slow test')) setTimeout(writeChunks, slowTurnMs)
+        else writeChunks()
       } else {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({

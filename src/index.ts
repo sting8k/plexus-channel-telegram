@@ -123,6 +123,8 @@ interface PendingReply {
   messageId: MessageId
   /** The turn the follow-up was claimed into, set when the agent claims it. */
   turn: number | undefined
+  /** Stops this turn's typing indicator; idempotent, and owned by this entry. */
+  typingStop: (() => void) | undefined
   timeoutDispose: () => void
 }
 
@@ -566,6 +568,60 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  /** How often the indicator is refreshed while a turn is pending. */
+  const TYPING_INTERVAL_MS = 4_000
+  /** The longest a turn may keep it up, so a turn that never settles cannot type forever. */
+  const TYPING_CAP_MS = 300_000
+
+  /**
+   * Show, and keep showing, the typing indicator while a turn is pending.
+   *
+   * Telegram's indicator expires after about five seconds, so the single call a
+   * turn used to make was long gone before a real answer arrived and the reader
+   * was left guessing whether anything was happening. This refreshes it; the cap
+   * stops a turn that never settles from typing forever. A failed refresh is
+   * logged and ignored — the indicator is a courtesy, and the turn it describes
+   * is not.
+   *
+   * @param chat - the conversation to show the indicator in.
+   * @returns an idempotent stop; the plugin's fiber also clears the timers.
+   */
+  function startTyping(chat: ChatKey): () => void {
+    const send = (): void => {
+      void client.sendChatAction(chat, 'typing').catch(logWarn)
+    }
+    send()
+    const interval = setInterval(send, TYPING_INTERVAL_MS)
+    const cap = setTimeout(() => stop(), TYPING_CAP_MS)
+    // `stop` cannot run before this assignment: the cap is minutes away, and the
+    // fiber effect below clears both timers if the plugin goes away first.
+    let dispose: () => void = () => { /* assigned two lines down */ }
+    let stopped = false
+    const stop = (): void => {
+      if (stopped) return
+      stopped = true
+      clearInterval(interval)
+      clearTimeout(cap)
+      dispose()
+    }
+    dispose = ctx.effect(() => () => {
+      clearInterval(interval)
+      clearTimeout(cap)
+    }, 'telegram-control.typing()')
+    return stop
+  }
+
+  /**
+   * Start the indicator for a pending reply unless it is already running.
+   *
+   * The entry owns the timer, so the follow-up and the status flip share one
+   * lifecycle instead of racing two intervals into the same conversation.
+   */
+  function ensureTyping(entry: PendingReply): void {
+    if (entry.typingStop !== undefined) return
+    entry.typingStop = startTyping(entry.chat)
+  }
+
   /** Register a pending reply for `chat` on `agent`'s session; call before `agent.followup`. */
   function registerPending(agent: Agent, chat: ChatKey, messageId: MessageId): void {
     const sessionId = agent.session.id
@@ -576,13 +632,17 @@ export function apply(ctx: Context, config: Config): void {
       pendingBySession.set(sessionId, byChat)
     }
     const existing = byChat.get(key)
-    if (existing !== undefined) existing.timeoutDispose()
+    if (existing !== undefined) {
+      existing.timeoutDispose()
+      existing.typingStop?.()
+    }
     const entry: PendingReply = {
       chat,
       buffer: [],
       startedAt: Date.now(),
       messageId,
       turn: undefined,
+      typingStop: undefined,
       timeoutDispose: () => { /* replaced below */ },
     }
     entry.timeoutDispose = ctx.effect(() => {
@@ -590,6 +650,9 @@ export function apply(ctx: Context, config: Config): void {
       return () => clearTimeout(timer)
     }, 'telegram-control.replyTimeout()')
     byChat.set(key, entry)
+    // Typing starts with the pending lifecycle, so every way that lifecycle ends —
+    // flush, the timeout, a failed follow-up, disposal — stops it in one place.
+    ensureTyping(entry)
   }
 
   /** Remove a pending reply and deliver whatever was accumulated. */
@@ -601,6 +664,7 @@ export function apply(ctx: Context, config: Config): void {
     byChat.delete(key)
     if (byChat.size === 0) pendingBySession.delete(sessionId)
     entry.timeoutDispose()
+    entry.typingStop?.()
     const text = entry.buffer.join('\n\n').trim()
     const note = reason === 'timeout'
       ? `(agent still busy after ${Math.round((Date.now() - entry.startedAt) / 1000)}s)`
@@ -1046,7 +1110,6 @@ export function apply(ctx: Context, config: Config): void {
       flush(sessionId, chat, 'idle')
       throw error
     }
-    void client.sendChatAction(chat, 'typing').catch(logWarn)
     ctx.logger.info(`telegram-control: follow-up queued for agent ${sessionId} from chat ${keyOf(chat)}`)
   }
 
@@ -1290,9 +1353,9 @@ export function apply(ctx: Context, config: Config): void {
     if (payload.status === 'idle') {
       for (const entry of byChat.values()) flush(sessionId, entry.chat, 'idle')
     } else if (payload.status === 'running') {
-      for (const entry of byChat.values()) {
-        void client.sendChatAction(entry.chat, 'typing').catch(logWarn)
-      }
+      // A turn started elsewhere keeps this conversation's indicator up too; the
+      // pending reply owns the timer, so this cannot start a second one.
+      for (const entry of byChat.values()) ensureTyping(entry)
     }
   })
 
@@ -1314,6 +1377,7 @@ export function apply(ctx: Context, config: Config): void {
     pendingBySession.delete(sessionId)
     for (const entry of byChat.values()) {
       entry.timeoutDispose()
+      entry.typingStop?.()
       void client.sendMessage(entry.chat, '⚠️ agent was disposed while working').catch(logWarn)
     }
   })

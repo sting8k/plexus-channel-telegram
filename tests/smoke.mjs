@@ -397,6 +397,47 @@ try {
   )
   // Let the scheduled button presses settle so the phase closes its turns.
   await waitFor(child, bootLog, () => tgCallbackAnswers.some((a) => a.text === 'Approved'), 'the topic approval answer')
+
+  // ---- phase E: the indicator outlives one call ----
+  // A real turn lasts longer than the five seconds Telegram shows "typing" for, so
+  // the indicator has to be refreshed while the turn runs and released when it ends.
+  const typingBefore = tgActions.filter((a) => a.action === 'typing').length
+  // The fake answers every ordinary prompt with the same text, so this must wait for
+  // one more answer than there was before the trigger, not for the text to appear.
+  const answersBefore = tgSent.filter((m) => m.message_thread_id === THREAD_ID && m.text.includes('Hello')).length
+  tgQueue.push({
+    update_id: 903,
+    message: {
+      message_id: 903,
+      chat: { id: CHAT_ID, type: 'supergroup' },
+      from: { id: CHAT_ID },
+      text: 'run slow test',
+      date: 0,
+      message_thread_id: THREAD_ID,
+      is_topic_message: true,
+    },
+  })
+  ok = ok && await waitFor(
+    child,
+    bootLog,
+    () => tgSent.filter((m) => m.message_thread_id === THREAD_ID && m.text.includes('Hello')).length > answersBefore,
+    'the slow turn to answer',
+    60_000,
+  )
+  const typingInTurn = tgActions.filter((a) => a.action === 'typing').length - typingBefore
+  check(
+    'phase E: a long turn keeps the indicator alive',
+    typingInTurn >= 2,
+    `${typingInTurn} typing action(s) across a turn longer than the refresh interval`,
+  )
+  // And it stops with the turn: one more refresh may already have been in flight.
+  await sleep(6_000)
+  const typingAfterReply = tgActions.filter((a) => a.action === 'typing').length - typingBefore
+  check(
+    'phase E: the indicator stops when the turn settles',
+    typingAfterReply <= typingInTurn + 1,
+    `${typingAfterReply - typingInTurn} typing action(s) after the reply (one in flight is allowed)`,
+  )
 } finally {
   if (child !== undefined) child.kill('SIGTERM')
   await new Promise((resolve) => child?.once('exit', resolve))
