@@ -33,6 +33,7 @@ const LLM_PORT = 3199
 const WEB_PORT = 3188
 const TOKEN = '123456:SMOKE-TEST-TOKEN'
 const CHAT_ID = 111222333
+const STRANGER_ID = 999_999_999 // never in the allowlist
 
 const failures = []
 function check(name, condition, detail = '') {
@@ -75,6 +76,17 @@ const tgServer = http.createServer((req, res) => {
       const approveButton = buttons.find(b => b.callback_data?.startsWith('approve:'))
       if (approveButton !== undefined) {
         tgApprovals.push(payload)
+        // A press from a chat outside the allowlist (e.g. a forwarded approval)
+        // arrives first and must be refused without settling the approval.
+        tgQueue.push({
+          update_id: 9_000 + tgApprovals.length,
+          callback_query: {
+            id: `cb-stranger-${tgApprovals.length}`,
+            from: { id: STRANGER_ID },
+            message: { message_id: messageId, chat: { id: STRANGER_ID } },
+            data: approveButton.callback_data,
+          },
+        })
         setTimeout(() => {
           tgQueue.push({
             update_id: 10_000 + tgApprovals.length,
@@ -417,8 +429,10 @@ try {
   check('phase C: approval message carries Allow/Reject buttons', approvalMsg !== undefined
     && approvalMsg.reply_markup?.inline_keyboard?.flat().some(b => b.callback_data?.startsWith('approve:'))
     && approvalMsg.reply_markup?.inline_keyboard?.flat().some(b => b.callback_data?.startsWith('reject:')))
-  ok = ok && await waitFor(child, bootLog, () => tgCallbackAnswers.length >= 1, 'the callback to be answered')
-  check('phase C: callback query answered', tgCallbackAnswers[0] !== undefined && tgCallbackAnswers[0].text === '已批准')
+  ok = ok && await waitFor(child, bootLog, () => tgCallbackAnswers.length >= 2, 'both callbacks to be answered')
+  check('phase C: button press from a non-allowlisted chat is refused', tgCallbackAnswers[0] !== undefined
+    && tgCallbackAnswers[0].callback_query_id.startsWith('cb-stranger-') && tgCallbackAnswers[0].text === 'not authorized')
+  check('phase C: callback query answered', tgCallbackAnswers[1] !== undefined && tgCallbackAnswers[1].text === '已批准')
   check('phase C: approval message edited with the outcome', tgEdits.some(m => m.text.includes('Approved')))
   ok = ok && await waitFor(child, bootLog, () => llmRequests.length >= llmBeforeApproval + 1, 'the post-approval model call')
   check('phase C: approved tool call continued the turn', llmRequests.length >= llmBeforeApproval + 1)
