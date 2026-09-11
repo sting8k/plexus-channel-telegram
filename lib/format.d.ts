@@ -12,7 +12,7 @@ export declare function escapeHtml(text: string): string;
  * a model reply must never produce a 400 from Telegram.
  */
 export declare function markdownToTelegramHtml(markdown: string): string;
-/** One-line preview of a tool call for the chat: the tool name plus its command or path, clipped. */
+/** Tool-call notice for the chat: the tool name, then its command or path as a code block (each field clipped to `maxChars`, the command's original line breaks kept). */
 export declare function toolCallPreview(name: string, rawArguments: string, maxChars?: number): string;
 /**
  * Split one message into Telegram-safe chunks (hard cap `max` chars each).

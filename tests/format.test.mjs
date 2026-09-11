@@ -138,11 +138,28 @@ test('markdownToTelegramHtml leaves snake_case and 2*3*4 alone', () => {
   assert.equal(markdownToTelegramHtml('use file_name_here and 2*3*4'), 'use file_name_here and 2*3*4')
 })
 
-test('toolCallPreview shows the command, clipped, and falls back to the name', () => {
-  assert.equal(toolCallPreview('bash', '{"command":"ls -la;  echo hi","description":"x"}'), '🔧 <code>bash</code> <code>ls -la; echo hi</code>')
-  assert.equal(toolCallPreview('bash', `{"command":"${'x'.repeat(200)}"}`).length < 160, true)
-  assert.equal(toolCallPreview('think', '{"thought":"..."}'), '🔧 <code>think</code>')
-  assert.equal(toolCallPreview('bash', 'not json'), '🔧 <code>bash</code>')
+test('toolCallPreview puts the command in a code block under the name, clipped, and falls back to the name', () => {
+  assert.equal(toolCallPreview('bash', '{"command":"ls -la\\necho hi","description":"List files"}'), '🔧 <b>bash</b> — List files\n<pre>ls -la\necho hi</pre>')
+  assert.equal(toolCallPreview('bash', '{"command":"pwd"}'), '🔧 <b>bash</b>\n<pre>pwd</pre>')
+  assert.equal(toolCallPreview('bash', `{"command":"${'x'.repeat(400)}"}`).length < 330, true)
+  assert.equal(toolCallPreview('think', '{"thought":"..."}'), '🔧 <b>think</b>')
+  assert.equal(toolCallPreview('bash', 'not json'), '🔧 <b>bash</b>')
+  // Every field is escaped, so markup in a command or description cannot close
+  // the bold or the block it sits in.
+  assert.equal(
+    toolCallPreview('bash', JSON.stringify({ command: 'echo "<x> & y"', description: 'a <b> & "c"' })),
+    '🔧 <b>bash</b> — a &lt;b&gt; &amp; &quot;c&quot;\n<pre>echo &quot;&lt;x&gt; &amp; y&quot;</pre>',
+  )
+  // The notice is sent as one message and never split, so no field may push it
+  // past Telegram's 4096-character limit — a long description is clipped too.
+  const long = toolCallPreview('bash', JSON.stringify({ command: 'pwd', description: 'x'.repeat(5000) }))
+  assert.ok(long.length < 4096, `the notice stays sendable, got ${long.length} chars`)
+  assert.ok(long.includes('…'), 'and the clipped field says so')
+  // A blank description adds no empty emphasis line.
+  assert.equal(
+    toolCallPreview('bash', JSON.stringify({ command: 'pwd', description: '   ' })),
+    '🔧 <b>bash</b>\n<pre>pwd</pre>',
+  )
 })
 
 test('splitMessage closes and reopens a fenced block at the boundary', () => {
